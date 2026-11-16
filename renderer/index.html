@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Ultra Downloader</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">U</div>
+      <div class="brand-text">
+        <div class="brand-name">Ultra</div>
+        <div class="brand-sub">Downloader</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <button class="nav-item active" data-tab="downloads">
+        <span class="nav-icon">⬇</span><span>Downloads</span>
+      </button>
+
+      <button class="nav-item" data-tab="finished">
+        <span class="nav-icon">✓</span><span>Finished</span>
+        <span class="nav-badge" id="navFinishedCount">0</span>
+      </button>
+
+      <button class="nav-item" data-tab="connections">
+        <span class="nav-icon">🌐</span><span>Connections</span>
+      </button>
+      <button class="nav-item" data-tab="settings">
+        <span class="nav-icon">⚙</span><span>Settings</span>
+      </button>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="status-dot"></div>
+      <span>Ready</span>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="pageTitle">Downloads</h1>
+        <p id="pageSubtitle" class="subtitle">Manage your download queue</p>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn ghost" id="chooseFolder">Change folder</button>
+      </div>
+    </header>
+
+    <div class="content">
+      <!-- Downloads -->
+      <section id="tab-downloads" class="panel active">
+        <div class="composer">
+          <input id="quickUrl" placeholder="Paste a download URL and press Enter..." />
+          <button id="quickAdd" class="btn primary">Add Download</button>
+        </div>
+        <div class="stats-row">
+          <div class="stat">
+            <div class="stat-value" id="statActive">0</div>
+            <div class="stat-label">Active</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" id="statQueued">0</div>
+            <div class="stat-label">Queued</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" id="statDone">0</div>
+            <div class="stat-label">Completed</div>
+          </div>
+        </div>
+        <div class="list" id="downloadList"></div>
+      </section>
+
+      <!-- Finished -->
+      <section id="tab-finished" class="panel">
+        <div class="toolbar">
+          <span class="hint" id="finishedSummary">Completed downloads</span>
+          <button id="clearFinished" class="btn sm ghost">Clear finished</button>
+        </div>
+        <div class="list" id="finishedList"></div>
+      </section>
+
+
+      <!-- Connections -->
+      <section id="tab-connections" class="panel">
+        <div class="toolbar">
+          <span class="hint">New adapters appear automatically. VPN / proxy / virtual adapters are excluded.</span>
+        </div>
+        <div class="list" id="connList"></div>
+      </section>
+
+      <!-- Settings -->
+      <section id="tab-settings" class="panel">
+        <div class="settings-card">
+          <div class="settings-group">
+            <label>Download folder</label>
+            <div class="input-row">
+              <input id="setDownloadDir" />
+              <button id="setFolderBtn" class="btn ghost">Browse</button>
+            </div>
+          </div>
+          <div class="settings-grid">
+            <div class="settings-group">
+              <label>Max concurrent jobs</label>
+              <input id="setMaxJobs" type="number" min="1" max="10" />
+            </div>
+            <div class="settings-group">
+              <label>Max chunk size (MB)</label>
+              <input id="setMaxChunk" type="number" min="16" max="1024" step="16" />
+            </div>
+            <div class="settings-group">
+              <label>Target parallel streams</label>
+              <input id="setTargetStreams" type="number" min="1" max="16" />
+            </div>
+            <div class="settings-group">
+              <label>Max connections per download</label>
+              <input id="setMaxConn" type="number" min="1" max="8" />
+            </div>
+            <div class="settings-group">
+              <label>Max streams per adapter</label>
+              <input id="setMaxStreams" type="number" min="1" max="32" />
+            </div>
+            <div class="settings-group">
+              <label>Global speed limit (0 = unlimited)</label>
+              <input id="setGlobalSpeed" type="number" min="0" step="0.1" />
+            </div>
+            <div class="settings-group">
+              <label>Speed unit</label>
+              <select id="setSpeedUnit">
+                <option value="mbps">Megabits/s (Mbps)</option>
+                <option value="mbs">Megabytes/s (MB/s)</option>
+              </select>
+            </div>
+          </div>
+          <button id="saveSettings" class="btn primary">Save Settings</button>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<div class="toast-container" id="toasts"></div>
+
+<!-- Refresh an expired download link -->
+<div class="modal-backdrop" id="linkModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>Refresh download link</h3>
+      <button class="modal-close" id="linkModalClose" aria-label="Close">×</button>
+    </div>
+    <p class="modal-text">
+      Paste a fresh link for <strong id="linkModalFile">this download</strong>. Everything already
+      downloaded is kept — the app checks the new link serves the same file before resuming.
+    </p>
+    <div class="modal-note" id="linkModalNote"></div>
+    <input id="linkModalInput" class="modal-input" type="text" spellcheck="false"
+           placeholder="https://…" />
+    <div class="modal-error" id="linkModalError"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="linkModalCancel">Cancel</button>
+      <button class="btn primary" id="linkModalSave">Verify &amp; resume</button>
+    </div>
+  </div>
+</div>
+<script src="renderer.js"></script>
+</body>
+</html>

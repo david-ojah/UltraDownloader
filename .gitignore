@@ -1,0 +1,17 @@
+# Build artifacts
+dist/
+node_modules/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Temp download storage
+.ud-parts/
+*.ud-assembling
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

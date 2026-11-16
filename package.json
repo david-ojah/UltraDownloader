@@ -1,0 +1,56 @@
+{
+  "name": "ultra-downloader",
+  "version": "1.0.0",
+  "description": "Ultra Downloader - multi-connection download manager for Windows",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "dist": "electron-builder --win --x64",
+    "dist:dir": "electron-builder --win --dir"
+  },
+  "keywords": [],
+  "author": "Ultra Downloader",
+  "license": "MIT",
+  "type": "commonjs",
+  "build": {
+    "appId": "com.ultradownloader.app",
+    "productName": "Ultra Downloader",
+    "copyright": "Copyright © 2026 Ultra Downloader",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "renderer/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Ultra Downloader",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico"
+    }
+  },
+  "devDependencies": {
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.1.1"
+  }
+}
