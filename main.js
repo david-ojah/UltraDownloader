@@ -13,16 +13,26 @@ let tray = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1100,
-    height: 720,
-    minWidth: 900,
-    minHeight: 600,
+    width: 1180,
+    height: 760,
+    resizable: false,
+    maximizable: false,
+    minimizable: true,
+    fullscreenable: false,
     title: 'Ultra Downloader',
-    backgroundColor: '#0f1218',
+    backgroundColor: '#061120',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      zoomFactor: 1
+    }
+  });
+  // One fixed size: no pinch zoom and no Ctrl +/- zoom.
+  mainWindow.webContents.setVisualZoomLevelLimits(1, 1);
+  mainWindow.webContents.on('before-input-event', (e, input) => {
+    if ((input.control || input.meta) && ['+', '=', '-', '_', '0'].includes(input.key)) {
+      e.preventDefault();
     }
   });
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
@@ -30,6 +40,9 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // No File/Edit/Window menu: removes full screen, zoom, reload and devtools
+  // shortcuts from the app entirely.
+  Menu.setApplicationMenu(null);
   db.init();
   downloader.init(sendToRenderer);
   // Resume any downloads left mid-flight (including one that was interrupted
@@ -103,12 +116,31 @@ ipcMain.handle('downloads:start', async (e, id) => downloader.start(id));
 ipcMain.handle('downloads:pause', async (e, id) => downloader.pause(id));
 ipcMain.handle('downloads:resume', async (e, id) => downloader.resume(id));
 ipcMain.handle('downloads:cancel', async (e, id) => downloader.cancel(id));
-ipcMain.handle('downloads:remove', async (e, id) => downloader.remove(id));
-ipcMain.handle('downloads:refreshLink', async (e, id, url) => downloader.refreshLink(id, url));
-ipcMain.handle('downloads:chooseFolder', async () => {
-  const r = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
-  return r.canceled ? null : r.filePaths[0];
+ipcMain.handle('downloads:remove', async (e, id, opts = {}) => {
+  const row = db.getDownload(id);
+  if (!row) return { cancelled: true };
+  // Finished downloads ask whether the file on disk should go too. Active
+  // entries (failed/paused/cancelled) only ever remove their partial data.
+  if (row.status === 'completed' && !opts.silent) {
+    const choice = await dialog.showMessageBox(mainWindow, {
+      type: 'question',
+      buttons: ['Remove from list', 'Delete file too', 'Cancel'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+      title: 'Delete download',
+      message: 'Remove this finished download?',
+      detail: `${row.filename || row.savePath || 'This download'}\n\nRemove the entry only, or also delete the file from disk?`
+    });
+    if (choice.response === 2) return { cancelled: true };
+    const deletedFile = choice.response === 1;
+    await downloader.remove(id, { deleteFile: deletedFile });
+    return { cancelled: false, deletedFile };
+  }
+  await downloader.remove(id, opts);
+  return { cancelled: false, deletedFile: false };
 });
+ipcMain.handle('downloads:refreshLink', async (e, id, url) => downloader.refreshLink(id, url));
 
 ipcMain.handle('shell:openPath', async (e, p) => shell.showItemInFolder(p));
 ipcMain.handle('shell:openFile', async (e, p) => shell.openPath(p));

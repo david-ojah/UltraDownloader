@@ -1,22 +1,23 @@
 :root {
-  --bg: #0a0d13;
-  --bg-2: #0f131b;
-  --surface: rgba(22, 27, 37, 0.72);
-  --surface-2: rgba(30, 36, 49, 0.6);
-  --border: rgba(255,255,255,0.06);
-  --border-strong: rgba(255,255,255,0.12);
-  --text: #e8ecf4;
-  --text-dim: #9aa4b8;
-  --text-muted: #6b7385;
-  --accent: #5b8cff;
-  --accent-2: #8a5bff;
-  --accent-glow: rgba(91,140,255,0.35);
-  --success: #3ddc97;
-  --danger: #ff5d6c;
+  --bg: #061120;
+  --bg-2: #08192b;
+  --surface: rgba(12, 31, 49, 0.78);
+  --surface-2: rgba(14, 36, 54, 0.62);
+  --border: rgba(53, 224, 208, 0.10);
+  --border-strong: rgba(53, 224, 208, 0.22);
+  --text: #dbe7ee;
+  --text-dim: #7c97a8;
+  --text-muted: #5a7a8c;
+  --accent: #35e0d0;
+  --accent-2: #6dffa8;
+  --accent-glow: rgba(53, 224, 208, 0.35);
+  --success: #6dffa8;
+  --danger: #ff6b6b;
   --warning: #ffc857;
+  --silver: #c3ced8;
   --radius: 14px;
   --radius-sm: 10px;
-  --shadow: 0 8px 32px rgba(0,0,0,0.35);
+  --shadow: 0 8px 32px rgba(0,0,0,0.45);
 }
 
 * { box-sizing: border-box; }
@@ -24,8 +25,8 @@ html, body { margin: 0; padding: 0; height: 100%; }
 body {
   font-family: 'Inter', system-ui, -apple-system, Segoe UI, sans-serif;
   background:
-    radial-gradient(1200px 600px at 20% -10%, rgba(91,140,255,0.12), transparent 60%),
-    radial-gradient(900px 500px at 100% 10%, rgba(138,91,255,0.10), transparent 60%),
+    radial-gradient(1200px 600px at 20% -10%, rgba(53,224,208,0.14), transparent 60%),
+    radial-gradient(900px 500px at 100% 10%, rgba(109,255,168,0.08), transparent 60%),
     var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
@@ -37,7 +38,7 @@ body {
 .sidebar {
   width: 232px;
   flex-shrink: 0;
-  background: linear-gradient(180deg, rgba(16,20,28,0.9), rgba(10,13,19,0.9));
+  background: linear-gradient(180deg, rgba(8,25,43,0.92), rgba(6,17,32,0.92));
   border-right: 1px solid var(--border);
   backdrop-filter: blur(20px);
   display: flex;
@@ -52,7 +53,7 @@ body {
   font-weight: 700; font-size: 18px; color: #fff;
   box-shadow: 0 4px 16px var(--accent-glow);
 }
-.brand-name { font-weight: 700; font-size: 16px; letter-spacing: -0.2px; }
+.brand-name { font-weight: 700; font-size: 16px; letter-spacing: 0.5px; color: var(--silver); text-transform: uppercase; }
 .brand-sub { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
 
 .nav { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
@@ -66,14 +67,14 @@ body {
 }
 .nav-item:hover { background: var(--surface-2); color: var(--text); }
 .nav-item.active {
-  background: linear-gradient(90deg, rgba(91,140,255,0.18), rgba(91,140,255,0.05));
-  border-color: rgba(91,140,255,0.25);
+  background: linear-gradient(90deg, rgba(53,224,208,0.18), rgba(53,224,208,0.05));
+  border-color: rgba(53,224,208,0.28);
   color: #fff;
 }
 .nav-icon { font-size: 16px; width: 20px; text-align: center; }
 .nav-badge {
   margin-left: auto; min-width: 20px; padding: 1px 6px; border-radius: 999px;
-  background: rgba(91,140,255,0.18); color: var(--accent);
+  background: rgba(53,224,208,0.18); color: var(--accent);
   font-size: 11px; font-weight: 700; text-align: center;
 }
 .nav-badge.hidden { display: none; }
@@ -124,7 +125,7 @@ body {
 }
 .btn.primary {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  color: #fff; box-shadow: 0 4px 14px var(--accent-glow);
+  color: #061120; box-shadow: 0 4px 14px var(--accent-glow); font-weight: 600;
 }
 .btn.primary:hover { transform: translateY(-1px); box-shadow: 0 6px 20px var(--accent-glow); }
 .btn.ghost {
@@ -160,10 +161,10 @@ body {
   padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 600;
   text-transform: capitalize;
 }
-.status-downloading { background: rgba(91,140,255,0.15); color: var(--accent); }
+.status-downloading { background: rgba(53,224,208,0.15); color: var(--accent); }
 .status-completed { background: rgba(61,220,151,0.15); color: var(--success); }
 .status-paused { background: rgba(255,200,87,0.15); color: var(--warning); }
-.status-assembling { background: rgba(138,91,255,0.18); color: #b79bff; }
+.status-assembling { background: rgba(53,224,208,0.16); color: var(--accent); }
 .status-failed, .status-cancelled { background: rgba(255,93,108,0.15); color: var(--danger); }
 .status-queued { background: rgba(255,255,255,0.08); color: var(--text-dim); }
 

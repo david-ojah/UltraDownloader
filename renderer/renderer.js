@@ -119,7 +119,7 @@ function etaFor(d, speed) {
 
 function connChips(d) {
   if (d.status !== 'downloading' || !Array.isArray(d.conns) || d.conns.length === 0) return '';
-  const COLORS = ['#5b8cff', '#3ddc97', '#ffc857', '#4dd0e1', '#8a5bff', '#ff8a5b'];
+  const COLORS = ['#35e0d0', '#6dffa8', '#ffc857', '#4dd0e1', '#c3ced8', '#ff8a5b'];
   return d.conns.map((c, i) => {
     const known = connections.find((x) => x.id === c.id);
     const name = (known && known.name) || c.name || c.id;
@@ -275,7 +275,7 @@ async function refreshDownloads() {
 $('#clearFinished').addEventListener('click', async () => {
   const done = downloads.filter(d => d.status === 'completed');
   if (!done.length) return;
-  for (const d of done) await window.api.downloads.remove(d.id);
+  for (const d of done) await window.api.downloads.remove(d.id, { silent: true });
   lastCompletedCount = 0;
   await refreshDownloads();
   toast(`Cleared ${done.length} finished item${done.length === 1 ? '' : 's'} from the list (files kept)`);
@@ -292,10 +292,6 @@ $('#quickAdd').addEventListener('click', async () => {
 });
 $('#quickUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#quickAdd').click(); });
 
-$('#chooseFolder').addEventListener('click', async () => {
-  const f = await window.api.downloads.chooseFolder();
-  if (f) { settings.downloadDir = f; await window.api.settings.set({ downloadDir: f }); $('#setDownloadDir').value = f; toast('Download folder updated'); }
-});
 
 // Connections
 async function renderConnections(forced) {
@@ -403,7 +399,6 @@ $('#linkModalInput').addEventListener('input', () => { $('#linkModalError').text
 // Settings
 async function loadSettings() {
   settings = await window.api.settings.get();
-  $('#setDownloadDir').value = settings.downloadDir || '';
   $('#setMaxJobs').value = settings.maxConcurrentJobs || 3;
   $('#setMaxChunk').value = settings.maxChunkSizeMB || 512;
   $('#setTargetStreams').value = settings.targetStreams || 4;
@@ -415,16 +410,11 @@ async function loadSettings() {
   const gKbps = parseInt(settings.globalSpeedLimitKbps || '0', 10) || 0;
   $('#setGlobalSpeed').value = unit === 'mbs' ? (gKbps / 8000) : (gKbps / 1000);
 }
-$('#setFolderBtn').addEventListener('click', async () => {
-  const f = await window.api.downloads.chooseFolder();
-  if (f) $('#setDownloadDir').value = f;
-});
 $('#saveSettings').addEventListener('click', async () => {
   const unit = $('#setSpeedUnit').value;
   const gVal = parseFloat($('#setGlobalSpeed').value) || 0;
   const gKbps = unit === 'mbs' ? Math.round(gVal * 8000) : Math.round(gVal * 1000);
   await window.api.settings.set({
-    downloadDir: $('#setDownloadDir').value,
     maxConcurrentJobs: $('#setMaxJobs').value,
     maxChunkSizeMB: $('#setMaxChunk').value,
     targetStreams: $('#setTargetStreams').value,

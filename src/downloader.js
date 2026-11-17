@@ -143,6 +143,13 @@ function ensurePartsDir(savePath, id) {
 function removePartsDir(dir) {
   if (!dir) return;
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  // Drop the shared .ud-parts folder once no download is using it.
+  try {
+    const parent = path.dirname(dir);
+    if (path.basename(parent) === PARTS_DIRNAME && fs.readdirSync(parent).length === 0) {
+      fs.rmdirSync(parent);
+    }
+  } catch {}
 }
 function fileSize(p) {
   try { return fs.statSync(p).size; } catch { return -1; }
@@ -620,8 +627,11 @@ async function runChunks(job, id, savePath, totalSize, slots) {
   clearInterval(ticker);
 
   if (job.cancelled) {
-    // Keep the parts: Cancel stops the transfer, Remove deletes the data.
-    db.updateDownload(id, { status: 'cancelled' });
+    // Cancel discards the partial transfer: delete the temp parts and any
+    // partial destination file now that the streams have stopped.
+    removePartsDir(job.partsDir || partsDirFor(savePath, id));
+    try { fs.rmSync(savePath, { force: true }); } catch {}
+    db.updateDownload(id, { status: 'cancelled', downloaded: 0 });
     emit('download:update', db.getDownload(id));
     return;
   }
@@ -903,21 +913,30 @@ async function resume(id) {
 }
 async function cancel(id) {
   const job = jobs.get(id);
+  const row = db.getDownload(id);
   if (job) job.cancelled = true;
   db.updateDownload(id, { status: 'cancelled' });
   emit('download:update', db.getDownload(id));
+  // A running worker loop cleans up after its streams stop. When nothing is
+  // running (failed, queued, or paused before an app restart) delete the
+  // partial data here so Cancel never leaves chunks behind. Completed rows are
+  // never touched by cancel.
+  if ((!job || !job.active) && row && row.status !== 'completed' && row.savePath) {
+    try { fs.rmSync(row.savePath, { force: true }); } catch {}
+    removePartsDir(partsDirFor(row.savePath, id));
+  }
 }
-async function remove(id) {
+async function remove(id, opts = {}) {
   const row = db.getDownload(id);
   const wasComplete = row && row.status === 'completed';
   await cancel(id);
-  // Finished downloads are only unlisted; their file stays on disk. Partial
-  // data from failed/cancelled/queued jobs is useless, so it is deleted.
-  if (!wasComplete && row) {
-    if (row.savePath) {
-      try { fs.unlinkSync(row.savePath); } catch {}
-      removePartsDir(partsDirFor(row.savePath, id));
+  if (row && row.savePath) {
+    // Finished downloads are only unlisted unless the caller explicitly asked
+    // to delete the file. Partial data from any other state is always removed.
+    if (!wasComplete || opts.deleteFile) {
+      try { fs.rmSync(row.savePath, { force: true }); } catch {}
     }
+    removePartsDir(partsDirFor(row.savePath, id));
   }
   db.deleteDownload(id);
   jobs.delete(id);
