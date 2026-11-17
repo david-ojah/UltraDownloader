@@ -7,6 +7,16 @@ const db = require('./src/db');
 const connections = require('./src/connections');
 const downloader = require('./src/downloader');
 
+function logDeletion(entry) {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const dir = app.getPath('userData');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const line = `${new Date().toISOString()} ${JSON.stringify(entry)}\n`;
+    fs.appendFileSync(path.join(dir, 'deleted.log'), line);
+  } catch {}
+}
 function humanSize(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let v = Number(bytes) || 0, i = 0;
@@ -51,6 +61,7 @@ app.whenReady().then(() => {
   // shortcuts from the app entirely.
   Menu.setApplicationMenu(null);
   db.init();
+  logDeletion({ action: 'startup', downloads: db.listDownloads().length, finished: db.listDownloads().filter(d => d.status === 'completed').length });
   downloader.init(sendToRenderer);
   // Resume any downloads left mid-flight (including one that was interrupted
   // while its final file was being built).
@@ -139,7 +150,7 @@ ipcMain.handle('downloads:add', async (e, url, opts) => downloader.addJob(url, o
 ipcMain.handle('downloads:start', async (e, id) => downloader.start(id));
 ipcMain.handle('downloads:pause', async (e, id) => downloader.pause(id));
 ipcMain.handle('downloads:resume', async (e, id) => downloader.resume(id));
-ipcMain.handle('downloads:cancel', async (e, id) => downloader.cancel(id));
+ipcMain.handle('downloads:cancel', async (e, id) => { const r = await downloader.cancel(id); logDeletion({ action: 'cancel', id, result: 'partial-data-removed' }); return r; });
 ipcMain.handle('downloads:remove', async (e, id, opts = {}) => {
   const row = db.getDownload(id);
   if (!row) return { cancelled: true };
@@ -162,9 +173,11 @@ ipcMain.handle('downloads:remove', async (e, id, opts = {}) => {
     await downloader.remove(id, { deleteFile: deletedFile });
     if (deletedFile && row.savePath) {
       // Send the file to the Recycle Bin instead of deleting it permanently,
-      // so a mistaken click can still be undone.
-      try { await shell.trashItem(row.savePath); }
-      catch { try { fs.rmSync(row.savePath, { force: true }); } catch {} }
+      // so a mistaken delete can still be undone.
+      try { await shell.trashItem(row.savePath); logDeletion({ action: 'trash', id, filename: row.filename, path: row.savePath, size: row.totalSize, result: 'recycle-bin' }); }
+      catch { try { fs.rmSync(row.savePath, { force: true }); logDeletion({ action: 'rmSync', id, filename: row.filename, path: row.savePath, size: row.totalSize, result: 'permanent' }); } catch (e) { logDeletion({ action: 'failed', id, filename: row.filename, path: row.savePath, error: String(e && e.message) }); } }
+    } else {
+      logDeletion({ action: 'unlist', id, filename: row.filename, path: row.savePath, size: row.totalSize, result: 'file-kept' });
     }
     return { cancelled: false, deletedFile };
   }
