@@ -7,6 +7,13 @@ const db = require('./src/db');
 const connections = require('./src/connections');
 const downloader = require('./src/downloader');
 
+function humanSize(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = Number(bytes) || 0, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(1)} ${units[i]}`;
+}
+
 
 let mainWindow = null;
 let tray = null;
@@ -139,6 +146,7 @@ ipcMain.handle('downloads:remove', async (e, id, opts = {}) => {
   // Finished downloads ask whether the file on disk should go too. Active
   // entries (failed/paused/cancelled) only ever remove their partial data.
   if (row.status === 'completed' && !opts.silent) {
+    const size = row.totalSize ? ` (${humanSize(row.totalSize)})` : '';
     const choice = await dialog.showMessageBox(mainWindow, {
       type: 'question',
       buttons: ['Remove from list', 'Delete file too', 'Cancel'],
@@ -147,11 +155,17 @@ ipcMain.handle('downloads:remove', async (e, id, opts = {}) => {
       noLink: true,
       title: 'Delete download',
       message: 'Remove this finished download?',
-      detail: `${row.filename || row.savePath || 'This download'}\n\nRemove the entry only, or also delete the file from disk?`
+      detail: `${row.filename || row.savePath || 'This download'}${size}\n\nRemove the entry only, or also delete the file from disk?`
     });
     if (choice.response === 2) return { cancelled: true };
     const deletedFile = choice.response === 1;
     await downloader.remove(id, { deleteFile: deletedFile });
+    if (deletedFile && row.savePath) {
+      // Send the file to the Recycle Bin instead of deleting it permanently,
+      // so a mistaken click can still be undone.
+      try { await shell.trashItem(row.savePath); }
+      catch { try { fs.rmSync(row.savePath, { force: true }); } catch {} }
+    }
     return { cancelled: false, deletedFile };
   }
   await downloader.remove(id, opts);

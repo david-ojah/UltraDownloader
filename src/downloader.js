@@ -995,9 +995,11 @@ async function remove(id, opts = {}) {
   const wasComplete = row && row.status === 'completed';
   await cancel(id);
   if (row && row.savePath) {
-    // Finished downloads are only unlisted unless the caller explicitly asked
-    // to delete the file. Partial data from any other state is always removed.
-    if (!wasComplete || opts.deleteFile) {
+    // Partial data from failed/cancelled/queued downloads is useless without
+    // the download, so it is removed outright. Finished files are never
+    // touched here: when the user asks to delete one, main.js moves it to the
+    // Recycle Bin so a mistaken delete stays recoverable.
+    if (!wasComplete) {
       try { fs.rmSync(row.savePath, { force: true }); } catch {}
     }
     removePartsDir(partsDirForRow(row, id));
