@@ -43,7 +43,9 @@ function init() {
       etag TEXT,
       lastModified TEXT,
       acceptRanges INTEGER DEFAULT 0,
-      partsDir TEXT
+      partsDir TEXT,
+      activeMs INTEGER DEFAULT 0,
+      finishedAt INTEGER
     );
     CREATE TABLE IF NOT EXISTS chunks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,6 +70,9 @@ function init() {
       for (const r of legacy) upd.run(path.join(path.dirname(r.savePath), '.ud-parts', String(r.id)), r.id);
     })();
   }
+  if (!cols.includes('activeMs')) db.exec('ALTER TABLE downloads ADD COLUMN activeMs INTEGER DEFAULT 0');
+  // Time actually spent transferring (pauses excluded) and when it finished.
+  if (!cols.includes('finishedAt')) db.exec('ALTER TABLE downloads ADD COLUMN finishedAt INTEGER');
   // default settings
   const defaults = {
     downloadDir: path.join(app.getPath('downloads'), 'UltraDownloader'),

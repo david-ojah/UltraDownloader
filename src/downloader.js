@@ -168,6 +168,25 @@ function fileSize(p) {
   try { return fs.statSync(p).size; } catch { return -1; }
 }
 
+// ---- Time accounting -------------------------------------------------------
+// Only time actually spent fetching/building the file counts: pausing stops the
+// clock and resuming starts it again, so a download parked overnight does not
+// wreck its average speed.
+function clockStart(job) {
+  if (!job.activeSince) job.activeSince = Date.now();
+}
+function clockElapsed(job) {
+  return (job.activeMs || 0) + (job.activeSince ? Date.now() - job.activeSince : 0);
+}
+function clockStop(job, id) {
+  if (job.activeSince) {
+    job.activeMs = (job.activeMs || 0) + (Date.now() - job.activeSince);
+    job.activeSince = null;
+  }
+  if (id) db.updateDownload(id, { activeMs: Math.round(job.activeMs || 0) });
+  return job.activeMs || 0;
+}
+
 // Join the parts into the final file, deleting each part as soon as its bytes
 // are safely in place. Peak usage is therefore the download plus one part.
 async function assembleFile(job, id, savePath, totalSize, chunks) {
@@ -239,7 +258,11 @@ async function assembleFile(job, id, savePath, totalSize, chunks) {
     if (size !== totalSize) throw new Error(`assembled file is ${size} bytes, expected ${totalSize}`);
     fs.renameSync(tmpFinal, savePath);
     removePartsDir(partsDir);
-    db.updateDownload(id, { status: 'completed', downloaded: totalSize, error: null });
+    const takenMs = clockStop(job, null);
+    db.updateDownload(id, {
+      status: 'completed', downloaded: totalSize, error: null,
+      activeMs: Math.round(takenMs), finishedAt: Date.now()
+    });
     emit('download:assembling', { id, done: totalSize, total: totalSize, finished: true });
     emit('download:update', db.getDownload(id));
   } catch (e) {
@@ -324,6 +347,10 @@ async function start(id) {
   job.paused = false;
   job.cancelled = false;
   job.active = true;
+  // Carry the time already spent on this download into the new run.
+  job.activeMs = Math.max(job.activeMs || 0, row.activeMs || 0);
+  job.activeSince = null;
+  clockStart(job);
 
   try {
     // Everything is already on disk (the app quit while the final file was
@@ -337,7 +364,10 @@ async function start(id) {
       job.totalSize = row.totalSize;
       if (fileSize(row.savePath) === row.totalSize) {
         removePartsDir(job.partsDir);
-        db.updateDownload(id, { status: 'completed', downloaded: row.totalSize, error: null });
+        db.updateDownload(id, {
+          status: 'completed', downloaded: row.totalSize, error: null,
+          activeMs: Math.round(job.activeMs), finishedAt: row.finishedAt || Date.now()
+        });
         emit('download:update', db.getDownload(id));
         return;
       }
@@ -456,6 +486,9 @@ async function start(id) {
     emit('download:update', db.getDownload(id));
     emit('download:error', { id, error: e.message });
   } finally {
+    // Freeze the clock for whatever stopped the transfer (done, paused, failed
+    // or cancelled); the stored total only ever holds active transfer time.
+    clockStop(job, id);
     job.active = false;
   }
 }
@@ -502,7 +535,11 @@ async function downloadSingle(job, id, savePath, totalSize) {
     try { fs.rmSync(savePath, { force: true }); } catch {}
     fs.renameSync(partPath, savePath);
     removePartsDir(partsDir);
-    db.updateDownload(id, { status: 'completed', downloaded: totalSize });
+    const takenMs = clockStop(job, null);
+    db.updateDownload(id, {
+      status: 'completed', downloaded: totalSize,
+      activeMs: Math.round(takenMs), finishedAt: Date.now()
+    });
   }
   emit('download:update', db.getDownload(id));
 }
@@ -633,7 +670,9 @@ async function runChunks(job, id, savePath, totalSize, slots) {
   const ticker = setInterval(() => {
     if (job.cancelled || job.paused) return;
     const downloaded = bytesDone();
-    db.updateDownload(id, { downloaded });
+    // Keep the running clock in the database too: if the app is killed, resume
+    // continues from the last tick instead of starting the timer over.
+    db.updateDownload(id, { downloaded, activeMs: Math.round(clockElapsed(job)) });
     emitProgress(id, downloaded, totalSize, connSnapshot());
   }, 500);
 
@@ -910,7 +949,11 @@ function computeSpeed(job, downloaded) {
 
 async function pause(id) {
   const job = jobs.get(id);
-  if (job) job.paused = true;
+  if (job) {
+    job.paused = true;
+    // Stop the clock the moment the user pauses, not when the streams drain.
+    clockStop(job, id);
+  }
   db.updateDownload(id, { status: 'paused' });
   emit('download:update', db.getDownload(id));
 }
@@ -920,6 +963,7 @@ async function resume(id) {
   // the worker loop has exited and the job has to be started again.
   if (job && job.chunks && job.chunks.length && job.active) {
     job.paused = false;
+    clockStart(job);
     db.updateDownload(id, { status: 'downloading' });
     emit('download:update', db.getDownload(id));
     return;
@@ -931,7 +975,10 @@ async function resume(id) {
 async function cancel(id) {
   const job = jobs.get(id);
   const row = db.getDownload(id);
-  if (job) job.cancelled = true;
+  if (job) {
+    job.cancelled = true;
+    clockStop(job, id);
+  }
   db.updateDownload(id, { status: 'cancelled' });
   emit('download:update', db.getDownload(id));
   // A running worker loop cleans up after its streams stop. When nothing is

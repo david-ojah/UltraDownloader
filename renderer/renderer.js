@@ -17,6 +17,19 @@ function fmtBytes(b) {
 function fmtSpeed(bps) {
   return fmtBytes(bps) + '/s';
 }
+function fmtDuration(ms) {
+  const total = Math.max(0, Number(ms) || 0);
+  const s = total / 1000;
+  if (s < 10) return s.toFixed(1) + 's';
+  if (s < 60) return Math.round(s) + 's';
+  const whole = Math.round(s);
+  const m = Math.floor(whole / 60), sec = whole % 60;
+  if (m < 60) return sec ? `${m}m ${sec}s` : `${m}m`;
+  const h = Math.floor(m / 60), min = m % 60;
+  if (h < 24) return min ? `${h}h ${min}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d ${h % 24}h`;
+}
 function speedUnit() { return (settings && settings.speedUnit) || 'mbps'; }
 function toSpeedValue(bps) {
   if (speedUnit() === 'mbs') return (bps / 1000000).toFixed(2) + ' MB/s';
@@ -139,6 +152,19 @@ function progressLine(d, speed) {
     const pct = Math.round(cardPct(d));
     return `${fmtBytes(d.totalSize)} · building final file… ${pct}%`;
   }
+  if (d.status === 'completed') {
+    // Transfer time only counts while the download was actually running, so a
+    // paused stretch never inflates the duration or drags the average down.
+    const bits = [fmtBytes(d.totalSize || d.downloaded)];
+    const ms = Number(d.activeMs) || 0;
+    if (ms > 0) {
+      bits.push(`took ${fmtDuration(ms)}`);
+      const bytes = Number(d.totalSize) || Number(d.downloaded) || 0;
+      const avg = bytes / (ms / 1000);
+      if (avg > 0) bits.push(`${toSpeedValue(avg)} avg`);
+    }
+    return bits.join(' · ');
+  }
   const pct = d.totalSize > 0 ? (d.downloaded / d.totalSize * 100) : 0;
   const bits = [`${fmtBytes(d.downloaded)} / ${fmtBytes(d.totalSize)}`];
   if (d.totalSize) bits.push(pct.toFixed(1) + '%');
@@ -173,6 +199,18 @@ function finishedActions() {
     <button class="btn sm danger" data-a="remove">Remove</button>`;
 }
 
+function finishedStats(d) {
+  const bits = [fmtBytes(d.totalSize || d.downloaded)];
+  const ms = Number(d.activeMs) || 0;
+  if (ms > 0) {
+    bits.push(`<span class="stat-strong">took ${fmtDuration(ms)}</span>`);
+    const bytes = Number(d.totalSize) || Number(d.downloaded) || 0;
+    const avg = bytes / (ms / 1000);
+    if (avg > 0) bits.push(`<span class="stat-strong">${toSpeedValue(avg)} avg</span>`);
+  }
+  return bits.join('<span class="stat-dot">·</span>');
+}
+
 function buildCard(d, finished) {
   const card = document.createElement('div');
   card.className = 'card';
@@ -184,7 +222,7 @@ function buildCard(d, finished) {
       <div class="card-title" title="${escapeHtml(d.url)}">${escapeHtml(d.filename || d.url)}</div>
       <span class="status-pill status-${d.status}">${d.status}</span>
     </div>
-    <div class="card-meta" data-meta>${escapeHtml(progressLine(d, speed))}</div>
+    <div class="card-meta" data-meta>${finished ? finishedStats(d) : escapeHtml(progressLine(d, speed))}</div>
     <div class="progress"><div data-bar style="width:${pct.toFixed(1)}%"></div></div>
     ${finished ? '' : `<div class="conn-speeds" data-conns>${connChips(d)}</div>`}
     ${d.error && d.status !== 'completed' ? `<div class="card-error">${escapeHtml(d.error)}</div>` : ''}

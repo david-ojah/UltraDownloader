@@ -157,6 +157,8 @@ body {
 .card-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .card-title { flex: 1; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-meta { color: var(--text-muted); font-size: 12px; }
+.card-meta .stat-strong { color: var(--text); font-weight: 600; }
+.card-meta .stat-dot { color: var(--text-dim); opacity: .7; margin: 0 6px; }
 .status-pill {
   padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 600;
   text-transform: capitalize;
