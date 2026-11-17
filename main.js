@@ -108,7 +108,24 @@ ipcMain.handle('connections:setEnabled', async (e, id, enabled) => { connections
 ipcMain.handle('connections:setCap', async (e, id, cap) => { connections.setCap(id, cap); downloader.invalidateLimits(); });
 
 ipcMain.handle('settings:get', async () => db.getSettings());
-ipcMain.handle('settings:set', async (e, s) => { const out = db.setSettings(s); downloader.invalidateLimits(); return out; });
+ipcMain.handle('settings:set', async (e, s) => {
+  // Folders are created up front so a typo fails here with a readable message
+  // instead of halfway through the first download.
+  for (const key of ['downloadDir', 'tempDir']) {
+    if (!(key in s)) continue;
+    const value = String(s[key] == null ? '' : s[key]).trim();
+    if (!value) { s[key] = ''; continue; }
+    try {
+      fs.mkdirSync(value, { recursive: true });
+    } catch (err) {
+      throw new Error(`cannot use "${value}" — ${err.message}`);
+    }
+    s[key] = value;
+  }
+  const out = db.setSettings(s);
+  downloader.invalidateLimits();
+  return out;
+});
 
 ipcMain.handle('downloads:list', async () => db.listDownloads());
 ipcMain.handle('downloads:add', async (e, url, opts) => downloader.addJob(url, opts));
@@ -141,6 +158,12 @@ ipcMain.handle('downloads:remove', async (e, id, opts = {}) => {
   return { cancelled: false, deletedFile: false };
 });
 ipcMain.handle('downloads:refreshLink', async (e, id, url) => downloader.refreshLink(id, url));
+ipcMain.handle('downloads:chooseFolder', async () => {
+  const r = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'createDirectory']
+  });
+  return r.canceled ? null : r.filePaths[0];
+});
 
 ipcMain.handle('shell:openPath', async (e, p) => shell.showItemInFolder(p));
 ipcMain.handle('shell:openFile', async (e, p) => shell.openPath(p));

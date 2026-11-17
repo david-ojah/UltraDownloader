@@ -211,10 +211,10 @@ body {
 /* Settings */
 .settings-card {
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 24px; backdrop-filter: blur(12px);
+  border-radius: var(--radius); padding: 20px 22px; backdrop-filter: blur(12px);
   max-width: 640px;
 }
-.settings-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+.settings-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
 .settings-group label { color: var(--text-dim); font-size: 13px; font-weight: 500; }
 .settings-group input {
   padding: 10px 12px; background: var(--surface-2); color: var(--text);
@@ -228,8 +228,12 @@ body {
   font-size: 14px; outline: none; cursor: pointer;
 }
 .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
-.input-row { display: flex; gap: 8px; }
-.input-row input { flex: 1; }
+.input-row { display: flex; gap: 8px; align-items: center; }
+.input-row input { flex: 1; min-width: 0; }
+.settings-hint {
+  margin: 0; color: var(--text-dim); font-size: 12px; line-height: 1.45;
+  opacity: .8;
+}
 
 /* Toolbar */
 .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }

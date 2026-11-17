@@ -42,7 +42,8 @@ function init() {
       error TEXT,
       etag TEXT,
       lastModified TEXT,
-      acceptRanges INTEGER DEFAULT 0
+      acceptRanges INTEGER DEFAULT 0,
+      partsDir TEXT
     );
     CREATE TABLE IF NOT EXISTS chunks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,9 +57,22 @@ function init() {
       FOREIGN KEY(downloadId) REFERENCES downloads(id) ON DELETE CASCADE
     );
   `);
+  // Part files used to always live next to the destination file; the folder is
+  // now configurable, so each download records where its own parts are kept.
+  const cols = db.prepare('PRAGMA table_info(downloads)').all().map((c) => c.name);
+  if (!cols.includes('partsDir')) {
+    db.exec('ALTER TABLE downloads ADD COLUMN partsDir TEXT');
+    const legacy = db.prepare('SELECT id, savePath FROM downloads WHERE savePath IS NOT NULL').all();
+    const upd = db.prepare('UPDATE downloads SET partsDir=? WHERE id=?');
+    db.transaction(() => {
+      for (const r of legacy) upd.run(path.join(path.dirname(r.savePath), '.ud-parts', String(r.id)), r.id);
+    })();
+  }
   // default settings
   const defaults = {
     downloadDir: path.join(app.getPath('downloads'), 'UltraDownloader'),
+    // Empty means "keep the temporary chunk files next to the download".
+    tempDir: '',
     maxConcurrentJobs: '3',
     chunkSizeMB: '32',
     // Big chunks keep a TLS connection alive for ~a minute instead of ~1s,

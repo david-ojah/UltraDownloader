@@ -94,6 +94,24 @@
       <!-- Settings -->
       <section id="tab-settings" class="panel">
         <div class="settings-card">
+          <div class="settings-group">
+            <label for="setDownloadDir">Download folder</label>
+            <div class="input-row">
+              <input id="setDownloadDir" spellcheck="false" />
+              <button id="setFolderBtn" class="btn ghost">Browse</button>
+            </div>
+          </div>
+          <div class="settings-group">
+            <label for="setTempDir">Temporary files folder</label>
+            <div class="input-row">
+              <input id="setTempDir" spellcheck="false" placeholder="Same folder as the download" />
+              <button id="setTempDirBtn" class="btn ghost">Browse</button>
+            </div>
+            <p class="settings-hint">
+              Chunk files are written here while a download runs and deleted once the finished
+              file is built. Leave empty to keep them in the download folder.
+            </p>
+          </div>
           <div class="settings-grid">
             <div class="settings-group">
               <label>Max concurrent jobs</label>

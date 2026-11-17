@@ -132,13 +132,26 @@ function uniquePath(dir, name) {
 const PARTS_DIRNAME = '.ud-parts';
 
 function partsDirFor(savePath, id) {
-  return path.join(path.dirname(savePath), PARTS_DIRNAME, String(id));
+  // Settings may point the temporary chunk files at their own folder — handy
+  // when the download drive is small. Empty means "next to the destination",
+  // which keeps assembling a plain local copy.
+  let base = '';
+  try { base = String(db.getSettings().tempDir || '').trim(); } catch {}
+  return path.join(base || path.dirname(savePath), PARTS_DIRNAME, String(id));
+}
+// Prefer the folder recorded on the row: it survives restarts and setting
+// changes, so resume/cancel always find the parts that actually exist.
+function partsDirForRow(row, id) {
+  if (row && row.partsDir) return row.partsDir;
+  return partsDirFor(row && row.savePath, id);
 }
 function partPathFor(dir, idx) { return path.join(dir, `${idx}.part`); }
-function ensurePartsDir(savePath, id) {
-  const dir = partsDirFor(savePath, id);
+function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+function ensurePartsDir(savePath, id) {
+  return ensureDir(partsDirFor(savePath, id));
 }
 function removePartsDir(dir) {
   if (!dir) return;
@@ -319,7 +332,7 @@ async function start(id) {
     const existing = db.getChunks(id);
     if (existing.length > 0 && row.totalSize > 0 && row.savePath &&
         existing.every((c) => c.status === 'completed')) {
-      job.partsDir = partsDirFor(row.savePath, id);
+      job.partsDir = partsDirForRow(row, id);
       job.savePath = row.savePath;
       job.totalSize = row.totalSize;
       if (fileSize(row.savePath) === row.totalSize) {
@@ -352,10 +365,14 @@ async function start(id) {
     db.updateDownload(id, { filename, savePath, totalSize, acceptRanges: acceptRanges ? 1 : 0, status: 'downloading', error: null });
     emit('download:update', db.getDownload(id));
 
-    // Parts sit next to the destination, so building the final file is a local
-    // copy and never needs a second volume.
-    const partsDir = ensurePartsDir(savePath, id);
+    // Parts sit in the configured temporary folder (or next to the destination
+    // when none is set). A resumed download keeps using the folder it already
+    // wrote to, even if the setting was changed since.
+    const partsDir = row.partsDir ? ensureDir(row.partsDir) : ensurePartsDir(savePath, id);
     job.partsDir = partsDir;
+    // Pin the folder on the row so a later resume (even after the setting is
+    // changed) still points at the part files that were really written.
+    db.updateDownload(id, { partsDir });
 
     if (!acceptRanges || totalSize <= 0) {
       await downloadSingle(job, id, savePath, totalSize);
@@ -923,7 +940,7 @@ async function cancel(id) {
   // never touched by cancel.
   if ((!job || !job.active) && row && row.status !== 'completed' && row.savePath) {
     try { fs.rmSync(row.savePath, { force: true }); } catch {}
-    removePartsDir(partsDirFor(row.savePath, id));
+    removePartsDir(partsDirForRow(row, id));
   }
 }
 async function remove(id, opts = {}) {
@@ -936,7 +953,7 @@ async function remove(id, opts = {}) {
     if (!wasComplete || opts.deleteFile) {
       try { fs.rmSync(row.savePath, { force: true }); } catch {}
     }
-    removePartsDir(partsDirFor(row.savePath, id));
+    removePartsDir(partsDirForRow(row, id));
   }
   db.deleteDownload(id);
   jobs.delete(id);
@@ -968,11 +985,11 @@ function fetchBytes(url, start, end) {
 
 // Read a completed range's bytes back from disk: the part file if this download
 // still has one, otherwise the finished file (older, preallocated jobs).
-function readChunkSample(id, savePath, chunk, n) {
-  const part = partPathFor(partsDirFor(savePath, id), chunk.idx);
+function readChunkSample(row, chunk, n) {
+  const part = partPathFor(partsDirForRow(row, row.id), chunk.idx);
   let file = null, offset = 0;
   if (fileSize(part) >= n) { file = part; offset = 0; }
-  else if (fileSize(savePath) >= chunk.start + n) { file = savePath; offset = chunk.start; }
+  else if (fileSize(row.savePath) >= chunk.start + n) { file = row.savePath; offset = chunk.start; }
   if (!file) return null;
   const buf = Buffer.alloc(n);
   const fd = fs.openSync(file, 'r');
@@ -1008,7 +1025,7 @@ async function refreshLink(id, newUrl) {
   if (done.length && row.savePath) {
     const c = done[Math.floor(done.length / 2)];
     const n = Math.min(65536, c.end - c.start + 1);
-    const local = readChunkSample(id, row.savePath, c, n);
+    const local = readChunkSample(row, c, n);
     if (local) {
       const fresh = await fetchBytes(url, c.start, c.start + n - 1);
       if (fresh.length < n || !fresh.subarray(0, n).equals(local)) {

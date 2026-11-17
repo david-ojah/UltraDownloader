@@ -18,7 +18,8 @@ contextBridge.exposeInMainWorld('api', {
     resume: (id) => ipcRenderer.invoke('downloads:resume', id),
     cancel: (id) => ipcRenderer.invoke('downloads:cancel', id),
     remove: (id, opts) => ipcRenderer.invoke('downloads:remove', id, opts),
-    refreshLink: (id, url) => ipcRenderer.invoke('downloads:refreshLink', id, url)
+    refreshLink: (id, url) => ipcRenderer.invoke('downloads:refreshLink', id, url),
+    chooseFolder: () => ipcRenderer.invoke('downloads:chooseFolder')
   },
   shell: {
     openPath: (p) => ipcRenderer.invoke('shell:openPath', p),

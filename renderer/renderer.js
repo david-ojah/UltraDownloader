@@ -399,6 +399,8 @@ $('#linkModalInput').addEventListener('input', () => { $('#linkModalError').text
 // Settings
 async function loadSettings() {
   settings = await window.api.settings.get();
+  $('#setDownloadDir').value = settings.downloadDir || '';
+  $('#setTempDir').value = settings.tempDir || '';
   $('#setMaxJobs').value = settings.maxConcurrentJobs || 3;
   $('#setMaxChunk').value = settings.maxChunkSizeMB || 512;
   $('#setTargetStreams').value = settings.targetStreams || 4;
@@ -410,19 +412,34 @@ async function loadSettings() {
   const gKbps = parseInt(settings.globalSpeedLimitKbps || '0', 10) || 0;
   $('#setGlobalSpeed').value = unit === 'mbs' ? (gKbps / 8000) : (gKbps / 1000);
 }
+$('#setFolderBtn').addEventListener('click', async () => {
+  const folder = await window.api.downloads.chooseFolder();
+  if (folder) $('#setDownloadDir').value = folder;
+});
+$('#setTempDirBtn').addEventListener('click', async () => {
+  const folder = await window.api.downloads.chooseFolder();
+  if (folder) $('#setTempDir').value = folder;
+});
 $('#saveSettings').addEventListener('click', async () => {
   const unit = $('#setSpeedUnit').value;
   const gVal = parseFloat($('#setGlobalSpeed').value) || 0;
   const gKbps = unit === 'mbs' ? Math.round(gVal * 8000) : Math.round(gVal * 1000);
-  await window.api.settings.set({
-    maxConcurrentJobs: $('#setMaxJobs').value,
-    maxChunkSizeMB: $('#setMaxChunk').value,
-    targetStreams: $('#setTargetStreams').value,
-    maxConnectionsPerDownload: $('#setMaxConn').value,
-    maxStreamsPerConnection: $('#setMaxStreams').value,
-    globalSpeedLimitKbps: gKbps,
-    speedUnit: unit
-  });
+  try {
+    await window.api.settings.set({
+      downloadDir: $('#setDownloadDir').value.trim(),
+      tempDir: $('#setTempDir').value.trim(),
+      maxConcurrentJobs: $('#setMaxJobs').value,
+      maxChunkSizeMB: $('#setMaxChunk').value,
+      targetStreams: $('#setTargetStreams').value,
+      maxConnectionsPerDownload: $('#setMaxConn').value,
+      maxStreamsPerConnection: $('#setMaxStreams').value,
+      globalSpeedLimitKbps: gKbps,
+      speedUnit: unit
+    });
+  } catch (e) {
+    toast(String((e && e.message) || e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''));
+    return;
+  }
   settings.speedUnit = unit;
   await loadSettings();
   toast('Settings saved');
