@@ -27,6 +27,32 @@ function humanSize(bytes) {
 
 let mainWindow = null;
 let tray = null;
+// Set when the user really quits (tray → Quit), so the close-to-tray handler
+// lets the window go instead of hiding it forever.
+let quitting = false;
+app.on('before-quit', () => { quitting = true; });
+
+// ---- Single instance -------------------------------------------------------
+// The app keeps running in the tray after its window closes, so a second launch
+// must wake the existing copy instead of starting another background instance
+// (each extra instance meant another tray icon and another process on the same
+// database).
+const singleInstanceLock = app.requestSingleInstanceLock();
+if (!singleInstanceLock) app.quit();
+
+function showWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+app.on('second-instance', () => {
+  showWindow();
+});
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -53,10 +79,19 @@ function createWindow() {
     }
   });
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  // Closing the window hides it to the tray: the app keeps running (downloads
+  // continue) and the next launch just brings the same window back.
+  mainWindow.on('close', (e) => {
+    if (quitting) return;
+    e.preventDefault();
+    mainWindow.hide();
+  });
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
 app.whenReady().then(() => {
+  // A second launch has already asked to quit; never initialise a duplicate.
+  if (!singleInstanceLock) return;
   // No File/Edit/Window menu: removes full screen, zoom, reload and devtools
   // shortcuts from the app entirely.
   Menu.setApplicationMenu(null);
@@ -75,7 +110,7 @@ app.whenReady().then(() => {
   createTray();
   // Seed the signature, then poll so hot-plugged adapters show up on their own.
   pollConnections().then(() => setInterval(pollConnections, 5000));
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) showWindow(); });
 });
 
 app.on('window-all-closed', () => {
@@ -90,13 +125,13 @@ function createTray() {
     return;
   }
   const menu = Menu.buildFromTemplate([
-    { label: 'Show', click: () => { if (mainWindow) mainWindow.show(); else createWindow(); } },
+    { label: 'Show', click: () => showWindow() },
     { type: 'separator' },
     { label: 'Quit', click: () => app.quit() }
   ]);
   tray.setToolTip('Ultra Downloader');
   tray.setContextMenu(menu);
-  tray.on('double-click', () => { if (mainWindow) mainWindow.show(); else createWindow(); });
+  tray.on('double-click', () => showWindow());
 }
 
 function sendToRenderer(channel, payload) {
