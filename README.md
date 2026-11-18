@@ -130,7 +130,9 @@ What happens:
   extension.
 
 The extension has no popup, options page or history. It talks only to
-`127.0.0.1`; no links or browsing data leave the PC.
+`127.0.0.1`; no links or browsing data leave the PC. The bridge stays available
+while Ultra Downloader is minimised or closed to the tray; it stops only when
+the app is fully quit.
 
 Known limits: downloads started by JavaScript, POST forms, redirects or
 `blob:` URLs cannot be intercepted. The context-menu fallback covers the final
