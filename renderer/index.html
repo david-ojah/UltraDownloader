@@ -37,7 +37,7 @@
     </nav>
     <div class="sidebar-footer">
       <div class="status-dot"></div>
-      <span>Ready</span>
+      <span id="appVersion">Ready</span>
     </div>
   </aside>
 
@@ -55,6 +55,13 @@
         <div class="composer">
           <input id="quickUrl" placeholder="Paste a download URL and press Enter..." />
           <button id="quickAdd" class="btn primary">Add Download</button>
+        </div>
+        <div class="toolbar queue-toolbar">
+          <span class="hint" id="queueStatus">Downloads start automatically.</span>
+          <div class="toolbar-end">
+            <button id="pauseAll" class="btn sm ghost">Pause all</button>
+            <button id="resumeAll" class="btn sm ghost">Resume all</button>
+          </div>
         </div>
         <div class="stats-row">
           <div class="stat">
@@ -145,6 +152,10 @@
               </select>
             </div>
           </div>
+          <p class="settings-hint" style="margin-bottom:16px">
+            Downloads start automatically, up to the max concurrent limit. Extra links wait
+            in the queue; use Pause all / Resume all on the Downloads tab to control the whole queue.
+          </p>
           <button id="saveSettings" class="btn primary">Save Settings</button>
         </div>
       </section>

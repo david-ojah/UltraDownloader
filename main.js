@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, Notification, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -6,6 +6,27 @@ const os = require('os');
 const db = require('./src/db');
 const connections = require('./src/connections');
 const downloader = require('./src/downloader');
+
+// Must be set early: Windows uses the AppUserModelID to resolve the Start Menu
+// shortcut (and therefore the app name/icon) shown in toast notifications.
+if (process.platform === 'win32') {
+  try { app.setAppUserModelId('com.ultradownloader.app'); } catch {}
+}
+
+function humanSize(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = Number(bytes) || 0, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(1)} ${units[i]}`;
+}
+function humanDuration(ms) {
+  const s = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
 
 function logDeletion(entry) {
   try {
@@ -17,12 +38,6 @@ function logDeletion(entry) {
     fs.appendFileSync(path.join(dir, 'deleted.log'), line);
   } catch {}
 }
-function humanSize(bytes) {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let v = Number(bytes) || 0, i = 0;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-  return `${v.toFixed(1)} ${units[i]}`;
-}
 
 
 let mainWindow = null;
@@ -30,7 +45,16 @@ let tray = null;
 // Set when the user really quits (tray → Quit), so the close-to-tray handler
 // lets the window go instead of hiding it forever.
 let quitting = false;
-app.on('before-quit', () => { quitting = true; });
+// Declared before the before-quit handler is registered: a second launch calls
+// app.quit() during module load, which fires that handler immediately.
+let powerBlockerId = null;
+app.on('before-quit', () => {
+  quitting = true;
+  if (powerBlockerId !== null) {
+    try { powerSaveBlocker.stop(powerBlockerId); } catch {}
+    powerBlockerId = null;
+  }
+});
 
 // ---- Single instance -------------------------------------------------------
 // The app keeps running in the tray after its window closes, so a second launch
@@ -54,6 +78,106 @@ app.on('second-instance', () => {
   showWindow();
 });
 
+// ---- Runtime status (notifications, taskbar, tray, power) -----------------
+const notifiedCompleted = new Set();
+const liveSpeeds = new Map();
+
+function notifyComplete(row) {
+  if (!Notification.isSupported()) return;
+  const bits = [humanSize(row.totalSize || row.downloaded || 0)];
+  if (Number(row.activeMs) > 0) bits.push(humanDuration(row.activeMs));
+  try {
+    const n = new Notification({
+      // The OS-level app label can fall back to "Electron", so put our name in
+      // the title as well.
+      title: 'Ultra Downloader — download complete',
+      body: `${row.filename || 'Download'} · ${bits.join(' · ')}`,
+      icon: path.join(__dirname, 'assets', 'icon.png')
+    });
+    n.on('click', () => {
+      showWindow();
+      if (row.savePath) {
+        try { shell.showItemInFolder(row.savePath); } catch {}
+      }
+    });
+    n.show();
+  } catch {}
+}
+
+// Keep the taskbar, tray tooltip and sleep blocker in sync with the DB. Called
+// from downloader events, so it also works while the window is hidden.
+function updateRuntimeStatus() {
+  let rows = [];
+  try { rows = db.listDownloads(); } catch { return; }
+  const active = rows.filter((r) => r.status === 'downloading' || r.status === 'assembling');
+  let fraction = -1;
+  if (active.length) {
+    const total = active.reduce((a, r) => a + (Number(r.totalSize) || 0), 0);
+    const done = active.reduce((a, r) => a + (
+      r.status === 'assembling' ? (Number(r.totalSize) || 0) : (Number(r.downloaded) || 0)), 0);
+    if (total > 0) fraction = Math.max(0, Math.min(1, done / total));
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.setProgressBar(fraction); } catch {}
+  }
+  // A long download must not be cut off because Windows decided to sleep.
+  if (active.length && powerBlockerId === null) {
+    try { powerBlockerId = powerSaveBlocker.start('prevent-app-suspension'); } catch { powerBlockerId = null; }
+  } else if (!active.length && powerBlockerId !== null) {
+    try { powerSaveBlocker.stop(powerBlockerId); } catch {}
+    powerBlockerId = null;
+  }
+  if (tray) {
+    if (!active.length) {
+      tray.setToolTip('Ultra Downloader — idle');
+    } else {
+      let speed = 0;
+      for (const [id, v] of liveSpeeds) {
+        if (active.some((r) => r.id === id)) speed += v;
+      }
+      const pct = fraction >= 0 ? ` · ${Math.round(fraction * 100)}%` : '';
+      const rate = speed > 0 ? ` · ${humanSize(speed)}/s` : '';
+      tray.setToolTip(`Ultra Downloader — ${active.length} active${pct}${rate}`);
+    }
+  }
+}
+
+function handleDownloaderEvent(channel, payload) {
+  if (channel === 'download:progress') {
+    if (payload && payload.id != null) liveSpeeds.set(payload.id, Number(payload.speed) || 0);
+    updateRuntimeStatus();
+    return;
+  }
+  if (channel === 'download:update') {
+    const d = payload;
+    if (!d) return;
+    if (d.status !== 'downloading' && d.status !== 'assembling') liveSpeeds.delete(d.id);
+    if (d.status === 'completed') {
+      // Only notify once per download, even though completion is emitted by
+      // both the assembly step and the final row update.
+      if (!notifiedCompleted.has(d.id)) {
+        notifiedCompleted.add(d.id);
+        notifyComplete(d);
+      }
+    } else {
+      notifiedCompleted.delete(d.id);
+    }
+    updateRuntimeStatus();
+    return;
+  }
+  if (channel === 'download:removed') {
+    if (payload) {
+      liveSpeeds.delete(payload.id);
+      notifiedCompleted.delete(payload.id);
+    }
+    updateRuntimeStatus();
+    return;
+  }
+  if (channel === 'queue:update' || channel === 'download:assembling' || channel === 'download:error') {
+    updateRuntimeStatus();
+  }
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1180,
@@ -72,7 +196,17 @@ function createWindow() {
     }
   });
   // One fixed size: no pinch zoom and no Ctrl +/- zoom.
-  mainWindow.webContents.setVisualZoomLevelLimits(1, 1);
+  // setVisualZoomLevelLimits returns a promise and can reject if the render
+  // frame is not ready yet; that is harmless, so ignore it and retry once the
+  // page has loaded.
+  const lockZoom = () => {
+    try {
+      const p = mainWindow.webContents.setVisualZoomLevelLimits(1, 1);
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch {}
+  };
+  lockZoom();
+  mainWindow.webContents.on('did-finish-load', lockZoom);
   mainWindow.webContents.on('before-input-event', (e, input) => {
     if ((input.control || input.meta) && ['+', '=', '-', '_', '0'].includes(input.key)) {
       e.preventDefault();
@@ -97,15 +231,15 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   db.init();
   logDeletion({ action: 'startup', downloads: db.listDownloads().length, finished: db.listDownloads().filter(d => d.status === 'completed').length });
-  downloader.init(sendToRenderer);
-  // Resume any downloads left mid-flight (including one that was interrupted
-  // while its final file was being built).
+  downloader.init((channel, payload) => {
+    sendToRenderer(channel, payload);
+    try { handleDownloaderEvent(channel, payload); } catch {}
+  });
+  // Anything left mid-flight goes back through the queue, so the concurrency
+  // limit is honoured after a restart too.
   setTimeout(() => {
-    try {
-      const rows = db.listDownloads().filter(d => d.status === 'downloading' || d.status === 'assembling');
-      for (const r of rows) downloader.resume(r.id).catch(() => {});
-    } catch (e) {}
-  }, 1500);
+    try { downloader.autostart(); updateRuntimeStatus(); } catch (e) { console.error('autostart', e); }
+  }, 1000);
   createWindow();
   createTray();
   // Seed the signature, then poll so hot-plugged adapters show up on their own.
@@ -177,14 +311,20 @@ ipcMain.handle('settings:set', async (e, s) => {
   }
   const out = db.setSettings(s);
   downloader.invalidateLimits();
+  // Raising the concurrency limit should put waiting downloads to work now.
+  downloader.pumpQueue();
   return out;
 });
 
 ipcMain.handle('downloads:list', async () => db.listDownloads());
 ipcMain.handle('downloads:add', async (e, url, opts) => downloader.addJob(url, opts));
-ipcMain.handle('downloads:start', async (e, id) => downloader.start(id));
+ipcMain.handle('downloads:start', async (e, id) => downloader.requestStart(id));
 ipcMain.handle('downloads:pause', async (e, id) => downloader.pause(id));
 ipcMain.handle('downloads:resume', async (e, id) => downloader.resume(id));
+ipcMain.handle('downloads:pauseAll', async () => downloader.pauseAll());
+ipcMain.handle('downloads:resumeAll', async () => downloader.resumeAll());
+ipcMain.handle('downloads:queueState', async () => downloader.queueState());
+ipcMain.handle('app:info', async () => ({ version: app.getVersion(), name: app.getName() }));
 ipcMain.handle('downloads:cancel', async (e, id) => { const r = await downloader.cancel(id); logDeletion({ action: 'cancel', id, result: 'partial-data-removed' }); return r; });
 ipcMain.handle('downloads:remove', async (e, id, opts = {}) => {
   const row = db.getDownload(id);

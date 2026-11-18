@@ -1,6 +1,6 @@
 {
   "name": "ultra-downloader",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Ultra Downloader - multi-connection download manager for Windows",
   "main": "main.js",
   "scripts": {

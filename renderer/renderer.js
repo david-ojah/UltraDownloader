@@ -4,6 +4,7 @@ const $$ = (s) => Array.from(document.querySelectorAll(s));
 let settings = {};
 let connections = [];
 let downloads = [];
+let queueState = { paused: false, active: 0, queued: 0, pausedJobs: 0, max: 3 };
 const grabCandidates = [];
 const connSpeeds = {};
 
@@ -71,6 +72,21 @@ $$('.nav-item').forEach(t => t.addEventListener('click', () => {
 }));
 
 // Stats
+function renderQueueState() {
+  const el = $('#queueStatus');
+  if (!el) return;
+  const max = Number(queueState.max) || Number(settings.maxConcurrentJobs) || 3;
+  let text = 'Downloads start automatically.';
+  if (queueState.paused) {
+    text = `Queue paused · ${queueState.active} running · ${queueState.queued} waiting`;
+  } else if (queueState.queued > 0) {
+    text = `${queueState.queued} waiting for a free slot · up to ${max} at once`;
+  } else if (queueState.active > 0) {
+    text = `${queueState.active} active · up to ${max} at once`;
+  }
+  el.textContent = text;
+}
+
 function updateStats() {
   const active = downloads.filter(d => d.status === 'downloading' || d.status === 'assembling').length;
   const queued = downloads.filter(d => d.status === 'queued' || d.status === 'paused').length;
@@ -78,6 +94,10 @@ function updateStats() {
   $('#statActive').textContent = active;
   $('#statQueued').textContent = queued;
   $('#statDone').textContent = done;
+  queueState.active = active;
+  queueState.queued = downloads.filter(d => d.status === 'queued').length;
+  queueState.pausedJobs = downloads.filter(d => d.status === 'paused').length;
+  renderQueueState();
   const badge = $('#navFinishedCount');
   if (badge) {
     badge.textContent = done;
@@ -148,6 +168,11 @@ function cardPct(d) {
 }
 
 function progressLine(d, speed) {
+  if (d.status === 'queued') {
+    return d.totalSize > 0
+      ? `${fmtBytes(d.downloaded)} / ${fmtBytes(d.totalSize)} · waiting for a free slot`
+      : 'waiting for a free slot';
+  }
   if (d.status === 'assembling') {
     const pct = Math.round(cardPct(d));
     return `${fmtBytes(d.totalSize)} · building final file… ${pct}%`;
@@ -173,8 +198,6 @@ function progressLine(d, speed) {
     bits.push(etaFor(d, speed) || (speed ? '' : 'estimating…'));
   } else if (d.status === 'paused') {
     bits.push('paused');
-  } else if (d.status === 'queued') {
-    bits.push('waiting to start');
   }
   return bits.filter(Boolean).join(' · ');
 }
@@ -183,7 +206,8 @@ function activeActions(d) {
   if (d.status === 'assembling') return '<span class="card-meta">finalizing…</span>';
   const canRefresh = d.status === 'failed' || d.status === 'paused' || d.status === 'cancelled';
   return `
-    ${d.status === 'queued' ? '<button class="btn sm primary" data-a="start">Start</button>' : ''}
+    ${d.status === 'queued' ? '<button class="btn sm primary" data-a="start">Start now</button>' : ''}
+    ${d.status === 'failed' ? '<button class="btn sm primary" data-a="start">Retry</button>' : ''}
     ${d.status === 'downloading' ? '<button class="btn sm ghost" data-a="pause">Pause</button>' : ''}
     ${d.status === 'paused' ? '<button class="btn sm primary" data-a="resume">Resume</button>' : ''}
     ${canRefresh ? '<button class="btn sm ghost" data-a="refresh" title="Paste a fresh link and keep what was already downloaded">Refresh link</button>' : ''}
@@ -234,7 +258,10 @@ function buildCard(d, finished) {
   card.querySelectorAll('[data-a]').forEach(btn => {
     btn.addEventListener('click', async () => {
       const a = btn.dataset.a;
-      if (a === 'start') await window.api.downloads.start(d.id);
+      if (a === 'start') {
+        const r = await window.api.downloads.start(d.id);
+        if (r && r.queued) toast('Waiting for a free slot', 'info');
+      }
       if (a === 'pause') await window.api.downloads.pause(d.id);
       if (a === 'resume') await window.api.downloads.resume(d.id);
       if (a === 'cancel') await window.api.downloads.cancel(d.id);
@@ -319,6 +346,20 @@ $('#clearFinished').addEventListener('click', async () => {
   toast(`Cleared ${done.length} finished item${done.length === 1 ? '' : 's'} from the list (files kept)`);
 });
 
+// Queue controls
+$('#pauseAll').addEventListener('click', async () => {
+  const r = await window.api.downloads.pauseAll();
+  await refreshDownloads();
+  const n = (r && r.paused) || 0;
+  toast(n ? `Paused ${n} download${n === 1 ? '' : 's'} — queue is on hold` : 'Queue is on hold');
+});
+$('#resumeAll').addEventListener('click', async () => {
+  const r = await window.api.downloads.resumeAll();
+  await refreshDownloads();
+  const n = (r && r.resumed) || 0;
+  toast(n ? `Resumed ${n} download${n === 1 ? '' : 's'}` : 'Queue resumed');
+});
+
 // Quick add
 $('#quickAdd').addEventListener('click', async () => {
   const url = $('#quickUrl').value.trim();
@@ -326,7 +367,7 @@ $('#quickAdd').addEventListener('click', async () => {
   await window.api.downloads.add(url, {});
   $('#quickUrl').value = '';
   await refreshDownloads();
-  toast('Download added to queue');
+  toast('Download added — starting automatically');
 });
 $('#quickUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#quickAdd').click(); });
 
@@ -449,6 +490,8 @@ async function loadSettings() {
   // convert stored kbps to selected unit for display
   const gKbps = parseInt(settings.globalSpeedLimitKbps || '0', 10) || 0;
   $('#setGlobalSpeed').value = unit === 'mbs' ? (gKbps / 8000) : (gKbps / 1000);
+  queueState.max = parseInt(settings.maxConcurrentJobs || '3', 10) || 3;
+  renderQueueState();
 }
 $('#setFolderBtn').addEventListener('click', async () => {
   const folder = await window.api.downloads.chooseFolder();
@@ -505,6 +548,11 @@ window.api.on('download:assembling', (p) => {
   updateCardLive(d);
 });
 window.api.on('download:removed', () => refreshDownloads());
+window.api.on('queue:update', (s) => {
+  if (!s) return;
+  queueState = { ...queueState, ...s };
+  renderQueueState();
+});
 window.api.on('connections:update', (list) => {
   if (Array.isArray(list)) connections = list;
   renderConnections(list);
@@ -522,4 +570,12 @@ window.api.on('speeds:update', (arr) => {
   await loadSettings();
   await renderConnections();
   await refreshDownloads();
+  try {
+    const qs = await window.api.downloads.queueState();
+    if (qs) { queueState = { ...queueState, ...qs }; renderQueueState(); }
+  } catch {}
+  try {
+    const info = await window.api.app.info();
+    $('#appVersion').textContent = info && info.version ? `Ready · v${info.version}` : 'Ready';
+  } catch {}
 })();

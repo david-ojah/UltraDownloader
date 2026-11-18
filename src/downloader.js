@@ -12,6 +12,9 @@ const connections = require('./connections');
 let send = null;
 const jobs = new Map(); // id -> job
 const connSpeeds = new Map(); // connectionId -> { bytes, lastTime, speed }
+// Destination paths already claimed by a row, even before the file exists.
+// Seeded from the database on startup and kept until the row is removed.
+const reservedSavePaths = new Map(); // download id -> savePath
 
 // ---- Dynamic chunk / stream planning ----
 // The file is split into about (2 * connections) chunks, and each active
@@ -28,6 +31,18 @@ const RAMP_WINDOW_MS = 2000;
 // many adapters or how high the per-connection setting is. 64 curl processes
 // is already far past what any home line can absorb.
 const MAX_TOTAL_STREAMS = 64;
+
+// Chunk retries: a flaky link gets several chances with growing delays before
+// the whole job is declared failed. The part file keeps whatever arrived, so a
+// retry only fetches the missing tail of that range.
+const MAX_CHUNK_RETRIES = 5;
+// Free space that is never allowed to be consumed: room for part-file writes,
+// the assembly copy and Windows itself.
+const DISK_RESERVE_BYTES = 128 * 1024 * 1024;
+
+// Set by "Pause all": running transfers stop and queued ones stay parked until
+// the user presses "Resume all".
+let queuePaused = false;
 
 // Split the file into ranges. The bulk is cut at chunkSize, but the final
 // region is split across every stream so one stream is never left ploughing
@@ -83,6 +98,11 @@ function planChunks(totalSize, connCount, settings) {
 
 function init(sendFn) {
   send = sendFn;
+  try {
+    for (const r of db.listDownloads()) {
+      if (r.savePath) reservedSavePaths.set(r.id, r.savePath);
+    }
+  } catch {}
   setInterval(() => {
     const arr = [];
     for (const [id, cs] of connSpeeds.entries()) {
@@ -113,14 +133,25 @@ function parseFilename(url, headers) {
   return 'download.bin';
 }
 
-function uniquePath(dir, name) {
+function uniquePath(dir, name, id) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const taken = (p) => {
+    if (fs.existsSync(p)) return true;
+    // Another row (queued/running/failed) may not have created its file yet,
+    // so also treat its future path as taken. Without this, two simultaneous
+    // downloads of the same filename pick the same name and overwrite.
+    const key = path.resolve(p).toLowerCase();
+    for (const [otherId, otherPath] of reservedSavePaths) {
+      if (otherId !== id && path.resolve(otherPath).toLowerCase() === key) return true;
+    }
+    return false;
+  };
   let full = path.join(dir, name);
-  if (!fs.existsSync(full)) return full;
+  if (!taken(full)) return full;
   const ext = path.extname(name);
   const stem = path.basename(name, ext);
   let i = 1;
-  while (fs.existsSync(path.join(dir, `${stem} (${i})${ext}`))) i++;
+  while (taken(path.join(dir, `${stem} (${i})${ext}`))) i++;
   return path.join(dir, `${stem} (${i})${ext}`);
 }
 
@@ -166,6 +197,76 @@ function removePartsDir(dir) {
 }
 function fileSize(p) {
   try { return fs.statSync(p).size; } catch { return -1; }
+}
+
+// ---- Free-space checks -----------------------------------------------------
+function volumeRoot(p) {
+  try {
+    const root = path.parse(path.resolve(p)).root;
+    return process.platform === 'win32' ? root.toUpperCase() : root;
+  } catch { return ''; }
+}
+function freeBytes(dir) {
+  try {
+    if (typeof fs.statfsSync !== 'function') return null;
+    const sf = fs.statfsSync(dir);
+    return Number(sf.bavail) * Number(sf.bsize);
+  } catch { return null; }
+}
+function sameVolume(a, b) {
+  const ra = volumeRoot(a), rb = volumeRoot(b);
+  return !!ra && ra === rb;
+}
+
+// Refuse to start a transfer that cannot possibly fit. Downloads write chunks
+// to the temp folder first and then build the final file next to the
+// destination, so both volumes matter:
+//   same volume      -> remaining data + room for one part during assembly
+//   different volume -> remaining data on temp, one part on the destination
+// A single-stream download only needs a rename (metadata), not a copy, unless
+// the temp folder is on another volume — in that case the whole file has to be
+// copied across.
+function ensureDiskSpace({ savePath, partsDir, remaining, assemblePart, singleCopy }) {
+  try { fs.mkdirSync(partsDir, { recursive: true }); } catch {}
+  const destDir = path.dirname(savePath);
+  const partsFree = freeBytes(partsDir);
+  if (partsFree == null) return; // unmeasurable (some network shares) — let it try
+  const remainingBytes = Math.max(0, Number(remaining) || 0);
+  const reserve = DISK_RESERVE_BYTES;
+  const same = sameVolume(partsDir, destDir);
+
+  if (same) {
+    const extra = singleCopy ? 0 : Math.max(0, Number(assemblePart) || 0);
+    const need = remainingBytes + extra + reserve;
+    if (partsFree < need) {
+      throw new Error(`not enough free space — about ${humanSize(need)} is needed on ` +
+        `${volumeRoot(partsDir) || 'the download drive'}, but only ${humanSize(partsFree)} is available`);
+    }
+    return;
+  }
+
+  const partsNeed = remainingBytes + reserve;
+  if (partsFree < partsNeed) {
+    throw new Error(`not enough free space for temporary files — about ${humanSize(partsNeed)} ` +
+      `is needed on ${volumeRoot(partsDir) || 'the temporary drive'}, but only ${humanSize(partsFree)} is available`);
+  }
+  const destFree = freeBytes(destDir);
+  const destNeed = (singleCopy ? remainingBytes : Math.max(0, Number(assemblePart) || 0)) + reserve;
+  if (destFree != null && destFree < destNeed) {
+    throw new Error(`not enough free space for the finished file — about ${humanSize(destNeed)} ` +
+      `is needed on ${volumeRoot(destDir) || 'the download drive'}, but only ${humanSize(destFree)} is available`);
+  }
+}
+
+function moveIntoPlace(src, dest) {
+  try {
+    fs.renameSync(src, dest);
+  } catch (e) {
+    if (e.code !== 'EXDEV') throw e;
+    // Temp folder on another drive: copy across, then drop the part.
+    fs.copyFileSync(src, dest);
+    fs.unlinkSync(src);
+  }
 }
 
 // ---- Time accounting -------------------------------------------------------
@@ -336,13 +437,184 @@ async function addJob(url, opts = {}) {
   // store desired dir in a side map
   jobs.set(id, { id, url, saveDir: dir, paused: false, cancelled: false, chunks: [], startedAt: null });
   emit('download:added', { id, url });
+  // Start it right away if a slot is free; otherwise it waits its turn.
+  pumpQueue();
   return id;
 }
 
-async function start(id) {
-  const job = jobs.get(id) || { id, url: db.getDownload(id).url, saveDir: db.getSettings().downloadDir, paused: false, cancelled: false, chunks: [] };
-  jobs.set(id, job);
+// ---- Queue -----------------------------------------------------------------
+// `maxConcurrentJobs` used to be a setting that nothing read: every link began
+// downloading the moment it was added. The queue below is the single place that
+// decides when a job may start, so the limit is honoured and extra links wait
+// their turn instead of competing for bandwidth.
+function maxConcurrentJobs() {
+  const n = parseInt(db.getSettings().maxConcurrentJobs, 10);
+  return Number.isFinite(n) && n > 0 ? Math.min(10, n) : 3;
+}
+
+function activeJobCount() {
+  let n = 0;
+  for (const job of jobs.values()) {
+    if (job.active && !job.paused && !job.cancelled) n++;
+  }
+  return n;
+}
+
+function queueState() {
+  let rows = [];
+  try { rows = db.listDownloads(); } catch {}
+  return {
+    paused: queuePaused,
+    active: rows.filter((r) => r.status === 'downloading' || r.status === 'assembling').length,
+    queued: rows.filter((r) => r.status === 'queued').length,
+    pausedJobs: rows.filter((r) => r.status === 'paused').length,
+    max: maxConcurrentJobs()
+  };
+}
+
+function emitQueueState() {
+  emit('queue:update', queueState());
+}
+
+// Start as many queued downloads as the concurrency limit allows. Jobs that
+// were paused mid-flight still have live (sleeping) workers, so the scheduler
+// wakes those instead of starting a second worker loop for the same file.
+function pumpQueue() {
+  if (queuePaused) { emitQueueState(); return; }
+  let guard = 0;
+  while (guard++ < 100) {
+    if (activeJobCount() >= maxConcurrentJobs()) break;
+    const next = db.listDownloads()
+      .filter((r) => r.status === 'queued')
+      .sort((a, b) => a.id - b.id)[0];
+    if (!next) break;
+    const running = jobs.get(next.id);
+    if (running && running.active) {
+      running.paused = false;
+      running.cancelled = false;
+      clockStart(running);
+      db.updateDownload(next.id, { status: 'downloading' });
+      emit('download:update', db.getDownload(next.id));
+      continue;
+    }
+    start(next.id).catch(() => {});
+  }
+  emitQueueState();
+}
+
+// User-initiated start/resume. If every slot is busy the download simply stays
+// queued (and is picked up automatically when a slot frees).
+function requestStart(id) {
   const row = db.getDownload(id);
+  if (!row) return { started: false, error: 'download not found' };
+  if (row.status === 'completed') return { started: false, completed: true };
+
+  const running = jobs.get(id);
+  if (running && running.active) {
+    if (!running.paused) return { started: true };
+    if (queuePaused || activeJobCount() >= maxConcurrentJobs()) {
+      db.updateDownload(id, { status: 'queued' });
+      emit('download:update', db.getDownload(id));
+      emitQueueState();
+      return { queued: true };
+    }
+    running.paused = false;
+    running.cancelled = false;
+    clockStart(running);
+    db.updateDownload(id, { status: 'downloading' });
+    emit('download:update', db.getDownload(id));
+    pumpQueue();
+    return { started: true };
+  }
+
+  if (queuePaused || activeJobCount() >= maxConcurrentJobs()) {
+    db.updateDownload(id, { status: 'queued' });
+    emit('download:update', db.getDownload(id));
+    emitQueueState();
+    return { queued: true };
+  }
+  start(id).catch(() => {});
+  return { started: true };
+}
+
+// After a restart, anything that was mid-transfer goes back into the queue so
+// the limit is honoured. Downloads that only needed their final file built are
+// resumed immediately: that needs no network and no queue slot.
+function autostart() {
+  let rows = [];
+  try { rows = db.listDownloads(); } catch { return; }
+  for (const r of rows) {
+    if (r.status === 'downloading') db.updateDownload(r.id, { status: 'queued' });
+  }
+  for (const r of rows) {
+    if (r.status === 'assembling') start(r.id).catch(() => {});
+  }
+  pumpQueue();
+}
+
+function pauseAll() {
+  queuePaused = true;
+  let paused = 0;
+  const seen = new Set();
+  // Pause every live transfer, including jobs still resolving their HEAD
+  // request (their row is still "queued" at that moment).
+  for (const [id, job] of jobs.entries()) {
+    if (!job.active || job.cancelled || job.paused) continue;
+    const row = db.getDownload(id);
+    if (!row || row.status === 'completed' || row.status === 'assembling') continue;
+    job.paused = true;
+    clockStop(job, id);
+    db.updateDownload(id, { status: 'paused' });
+    emit('download:update', db.getDownload(id));
+    seen.add(id);
+    paused++;
+  }
+  for (const r of db.listDownloads()) {
+    if (r.status !== 'downloading' || seen.has(r.id)) continue;
+    db.updateDownload(r.id, { status: 'paused' });
+    emit('download:update', db.getDownload(r.id));
+    paused++;
+  }
+  emitQueueState();
+  return { paused, ...queueState() };
+}
+
+function resumeAll() {
+  queuePaused = false;
+  let resumed = 0;
+  for (const r of db.listDownloads()) {
+    if (r.status !== 'paused') continue;
+    db.updateDownload(r.id, { status: 'queued' });
+    emit('download:update', db.getDownload(r.id));
+    resumed++;
+  }
+  pumpQueue();
+  return { resumed, ...queueState() };
+}
+
+async function start(id) {
+  const row = db.getDownload(id);
+  if (!row) return;
+  let job = jobs.get(id);
+  if (job && job.active) {
+    // Never run two worker loops for one download (e.g. the user presses
+    // Start twice, or the queue wakes a job that is already running).
+    if (job.paused && !queuePaused && activeJobCount() < maxConcurrentJobs()) {
+      job.paused = false;
+      job.cancelled = false;
+      clockStart(job);
+      db.updateDownload(id, { status: 'downloading' });
+      emit('download:update', db.getDownload(id));
+    }
+    return;
+  }
+  if (!job) {
+    job = { id, url: row.url, saveDir: db.getSettings().downloadDir, paused: false, cancelled: false, chunks: [], startedAt: null };
+    jobs.set(id, job);
+  }
+  job.diskLow = null;
+  job.assemblePart = 0;
+  job.singleCopy = false;
   job.url = row.url;
   job.paused = false;
   job.cancelled = false;
@@ -388,9 +660,19 @@ async function start(id) {
     }
     const filename = parseFilename(job.url, info.headers);
     const dir = job.saveDir || db.getSettings().downloadDir;
-    const savePath = row.savePath || uniquePath(dir, filename);
+    const savePath = row.savePath || uniquePath(dir, filename, id);
+    reservedSavePaths.set(id, savePath);
     const totalSize = info.size;
     const acceptRanges = info.acceptRanges;
+
+    // The user may have pressed Pause while the HEAD request was in flight.
+    // Honour it before any data is written, instead of overwriting the paused
+    // state with "downloading" a moment later.
+    if (job.paused && !job.cancelled) {
+      db.updateDownload(id, { status: 'paused' });
+      emit('download:update', db.getDownload(id));
+      return;
+    }
 
     db.updateDownload(id, { filename, savePath, totalSize, acceptRanges: acceptRanges ? 1 : 0, status: 'downloading', error: null });
     emit('download:update', db.getDownload(id));
@@ -404,6 +686,22 @@ async function start(id) {
     // changed) still points at the part files that were really written.
     db.updateDownload(id, { partsDir });
 
+    // Fail fast with a readable message instead of downloading for hours and
+    // then running out of space. The assembly needs one extra part of
+    // headroom on the destination volume.
+    const doneBytes = db.getChunks(id).reduce((a, c) => a + (c.downloaded || 0), 0);
+    const spaceSettings = db.getSettings();
+    const maxPartBytes = Math.max(1, parseFloat(spaceSettings.maxChunkSizeMB) || 512) * 1024 * 1024;
+    job.assemblePart = Math.min(totalSize, maxPartBytes);
+    job.singleCopy = !acceptRanges;
+    ensureDiskSpace({
+      savePath,
+      partsDir,
+      remaining: Math.max(0, totalSize - doneBytes),
+      assemblePart: job.assemblePart,
+      singleCopy: job.singleCopy
+    });
+
     if (!acceptRanges || totalSize <= 0) {
       await downloadSingle(job, id, savePath, totalSize);
       return;
@@ -415,6 +713,10 @@ async function start(id) {
     const maxConn = Number.isFinite(configuredMax) && configuredMax > 0 ? configuredMax : allEnabled.length;
     const conns = allEnabled.slice(0, maxConn);
     if (conns.length === 0) {
+      // Fallback to a single stream; if the temp folder is on another drive,
+      // the finished file is copied across, so check that space too.
+      job.singleCopy = true;
+      ensureDiskSpace({ savePath, partsDir, remaining: totalSize, assemblePart: 0, singleCopy: true });
       await downloadSingle(job, id, savePath, totalSize);
       return;
     }
@@ -482,14 +784,24 @@ async function start(id) {
 
   } catch (e) {
     console.error('START ERR', e && e.stack);
-    db.updateDownload(id, { status: 'failed', error: e.message });
-    emit('download:update', db.getDownload(id));
-    emit('download:error', { id, error: e.message });
+    const message = (e && e.message) || String(e);
+    if (job.cancelled) {
+      // cancel() already set the final state and removed the partial data.
+    } else if (job.paused) {
+      db.updateDownload(id, { status: 'paused' });
+      emit('download:update', db.getDownload(id));
+    } else {
+      db.updateDownload(id, { status: 'failed', error: message });
+      emit('download:update', db.getDownload(id));
+      emit('download:error', { id, error: message });
+    }
   } finally {
     // Freeze the clock for whatever stopped the transfer (done, paused, failed
     // or cancelled); the stored total only ever holds active transfer time.
     clockStop(job, id);
     job.active = false;
+    // A finished/failed job frees its queue slot; let the next link start.
+    setTimeout(() => { try { pumpQueue(); } catch {} }, 0);
   }
 }
 
@@ -508,32 +820,59 @@ async function downloadSingle(job, id, savePath, totalSize) {
     throw new Error(httpMessage(res.statusCode));
   }
   let downloaded = 0;
+  let streamError = null;
+  let lastSpaceCheck = 0;
+  const checkSpace = () => {
+    if (job.diskLow) throw job.diskLow;
+    const now = Date.now();
+    if (now - lastSpaceCheck < 5000) return;
+    lastSpaceCheck = now;
+    const free = freeBytes(partsDir);
+    if (free != null && free < DISK_RESERVE_BYTES) {
+      job.diskLow = new Error(`not enough free space on ${volumeRoot(partsDir) || 'the temporary drive'} — free some space, then click Retry`);
+      throw job.diskLow;
+    }
+  };
   res.on('data', (d) => {
-    if (job.cancelled) { res.destroy(); return; }
+    if (job.cancelled || job.diskLow) { try { res.destroy(); } catch {} return; }
     res.pause();
     (async () => {
       try {
+        checkSpace();
         await acquireTokens(d.length, null);
-        if (job.cancelled) { res.destroy(); return; }
+        while (job.paused && !job.cancelled && !job.diskLow) await sleep(200);
+        if (job.cancelled || job.diskLow) { try { res.destroy(); } catch {} return; }
         downloaded += d.length;
         ws.write(d);
         db.updateDownload(id, { downloaded });
         emitProgress(id, downloaded, totalSize || 0);
-      } catch (e) {}
-      if (!job.cancelled) res.resume();
+      } catch (e) {
+        streamError = streamError || e;
+        try { res.destroy(); } catch {}
+      }
+      if (!job.cancelled && !job.diskLow) res.resume();
     })();
   });
   await new Promise((resolve, reject) => {
-    res.on('end', () => ws.end(() => resolve()));
-    res.on('error', reject);
-    ws.on('error', reject);
+    let settled = false;
+    const done = (fn, value) => { if (settled) return; settled = true; fn(value); };
+    res.on('end', () => ws.end(() => done(resolve)));
+    res.on('error', (e) => done(reject, e));
+    res.on('close', () => {
+      if (job.cancelled) { try { ws.end(); } catch {} done(resolve); }
+      else if (!res.complete) done(reject, new Error('connection closed before the file finished'));
+    });
+    ws.on('error', (e) => done(reject, e));
   });
+  if (streamError) throw streamError;
+  if (job.diskLow) throw job.diskLow;
   if (job.cancelled) {
+    try { ws.end(); } catch {}
     removePartsDir(partsDir);
     db.updateDownload(id, { status: 'cancelled' });
   } else {
     try { fs.rmSync(savePath, { force: true }); } catch {}
-    fs.renameSync(partPath, savePath);
+    moveIntoPlace(partPath, savePath);
     removePartsDir(partsDir);
     const takenMs = clockStop(job, null);
     db.updateDownload(id, {
@@ -667,8 +1006,29 @@ async function runChunks(job, id, savePath, totalSize, slots) {
     return out;
   };
 
+  // Low-space guard. Preflight only knows the size at the start; another
+  // program can fill the drive while a big transfer runs. Stop cleanly (keeping
+  // the parts) instead of letting every stream fail with a raw ENOSPC.
+  let lastSpaceCheck = 0;
+  const spaceThreshold = () => {
+    const same = sameVolume(job.partsDir || partsDirFor(savePath, id), path.dirname(savePath));
+    return DISK_RESERVE_BYTES + (same ? (job.assemblePart || 0) : 0);
+  };
+  const spaceCheck = () => {
+    if (job.diskLow) return;
+    const now = Date.now();
+    if (now - lastSpaceCheck < 5000) return;
+    lastSpaceCheck = now;
+    const dir = job.partsDir || partsDirFor(savePath, id);
+    const free = freeBytes(dir);
+    if (free != null && free < spaceThreshold()) {
+      job.diskLow = new Error(`not enough free space on ${volumeRoot(dir) || 'the temporary drive'} — free some space, then click Retry`);
+    }
+  };
+
   const ticker = setInterval(() => {
     if (job.cancelled || job.paused) return;
+    spaceCheck();
     const downloaded = bytesDone();
     // Keep the running clock in the database too: if the app is killed, resume
     // continues from the last tick instead of starting the timer over.
@@ -689,6 +1049,14 @@ async function runChunks(job, id, savePath, totalSize, slots) {
     try { fs.rmSync(savePath, { force: true }); } catch {}
     db.updateDownload(id, { status: 'cancelled', downloaded: 0 });
     emit('download:update', db.getDownload(id));
+    return;
+  }
+
+  if (job.diskLow) {
+    const downloaded = bytesDone();
+    db.updateDownload(id, { status: 'failed', downloaded, error: job.diskLow.message });
+    emit('download:update', db.getDownload(id));
+    emit('download:error', { id, error: job.diskLow.message });
     return;
   }
 
@@ -713,17 +1081,25 @@ async function runChunks(job, id, savePath, totalSize, slots) {
   emit('download:update', db.getDownload(id));
 }
 
+function isRetryableError(e) {
+  const status = e && e.httpStatus;
+  if (!status) return true; // network reset, timeout, short read, ...
+  if (status === 408 || status === 425 || status === 429) return true;
+  return status >= 500;
+}
+
 async function workerLoop(slot, job, id, pending, ctl) {
   while (true) {
-    if (job.cancelled) return;
+    if (job.cancelled || job.diskLow) return;
     // The per-adapter controller can shrink a link's budget when an extra
     // stream did not pay off. Retire surplus workers here, before they claim
     // another chunk, so the change takes effect without killing a transfer.
     if (ctl && (ctl.perSlot.get(slot.id) || 0) > (ctl.budget.get(slot.id) || 1)) return;
     // wait while paused
-    while (job.paused && !job.cancelled) {
+    while (job.paused && !job.cancelled && !job.diskLow) {
       await sleep(200);
     }
+    if (job.cancelled || job.diskLow) return;
     // get next pending chunk assigned to this slot's connection
     let chunk = null;
     for (const c of pending) {
@@ -744,15 +1120,20 @@ async function workerLoop(slot, job, id, pending, ctl) {
       db.updateChunk(chunk.dbId, { downloaded: chunk.end - chunk.start + 1, status: 'completed' });
     } catch (e) {
       console.error('CHUNK ERR', chunk.idx, e && e.message);
+      if (job.diskLow) { chunk.status = 'pending'; return; }
+      if (job.paused) { chunk.status = 'pending'; continue; }
       chunk.retries = (chunk.retries || 0) + 1;
-      if (chunk.retries >= 5) {
+      if (chunk.retries > MAX_CHUNK_RETRIES || !isRetryableError(e)) {
         chunk.status = 'failed';
         db.updateChunk(chunk.dbId, { downloaded: chunk.downloaded || 0, status: 'failed' });
       } else {
-        // keep partial progress; downloadChunk resumes from chunk.downloaded
+        // Keep partial progress; downloadChunk resumes from chunk.downloaded.
+        // Growing delays give a flaky link time to recover without hammering
+        // it, and the jitter avoids every stream retrying in lockstep.
         chunk.status = 'pending';
+        const wait = Math.min(30000, 1000 * Math.pow(2, chunk.retries - 1));
+        await sleep(wait + Math.floor(Math.random() * 500));
       }
-      await sleep(1000);
     }
   }
 }
@@ -863,12 +1244,12 @@ async function downloadChunk(job, id, chunk, slot) {
     let writeError = null;
     proc.stderr.on('data', (d) => { stderr += d.toString(); });
     proc.stdout.on('data', (d) => {
-      if (job.cancelled) { proc.kill(); return; }
+      if (job.cancelled || job.diskLow || job.paused) { proc.kill(); return; }
       (async () => {
         pending++;
         try {
           await acquireTokens(d.length, slot.id);
-          if (job.cancelled) { proc.kill(); return; }
+          if (job.cancelled || job.diskLow || job.paused) { proc.kill(); return; }
           const pos = chunk.downloaded; // offset inside this chunk's part file
           chunk.downloaded += d.length; // reserve the position before awaiting
           const bytesWritten = await new Promise((resolve, reject) => {
@@ -882,6 +1263,9 @@ async function downloadChunk(job, id, chunk, slot) {
           job.connBytes.set(slot.id, (job.connBytes.get(slot.id) || 0) + d.length);
         } catch (e) {
           chunk.downloaded = Math.max(0, chunk.downloaded - d.length);
+          if (e && e.code === 'ENOSPC') {
+            job.diskLow = new Error(`not enough free space on ${volumeRoot(job.partsDir) || 'the temporary drive'} — free some space, then click Retry`);
+          }
           writeError = e;
           try { proc.kill(); } catch {}
           reject(e);
@@ -898,6 +1282,8 @@ async function downloadChunk(job, id, chunk, slot) {
         try { headers = fs.readFileSync(headerFile, 'utf8'); } catch {}
         try { fs.unlinkSync(headerFile); } catch {}
         if (job.cancelled) return resolve();
+        if (job.diskLow) return reject(job.diskLow);
+        if (job.paused) return reject(Object.assign(new Error('paused'), { paused: true }));
         if (writeError) return reject(writeError);
         const statusLine = (headers.split(/\r?\n/)[0] || '').trim();
         const statusMatch = /^HTTP\/\S+\s+(\d{3})/.exec(statusLine);
@@ -913,7 +1299,11 @@ async function downloadChunk(job, id, chunk, slot) {
           return resolve();
         }
         if (chunk.downloaded >= expected) return resolve(); // server closed after full data
-        if (status >= 400) return reject(new Error(httpMessage(status)));
+        if (status >= 400) {
+          const err = new Error(httpMessage(status));
+          err.httpStatus = status;
+          return reject(err);
+        }
         reject(new Error('curl exit ' + code + ' ' + stderr.trim()));
       })();
     });
@@ -922,6 +1312,8 @@ async function downloadChunk(job, id, chunk, slot) {
   try {
     await attempt(conn.localAddress);
   } catch (e) {
+    // Stop-conditions are not worth a second attempt on another interface.
+    if (job.cancelled || job.paused || job.diskLow || (e && e.paused)) throw e;
     // fallback to the default interface (e.g. VPN/virtual adapter in the way)
     await attempt(null);
   }
@@ -948,6 +1340,8 @@ function computeSpeed(job, downloaded) {
 }
 
 async function pause(id) {
+  const row = db.getDownload(id);
+  if (!row || row.status === 'assembling' || row.status === 'completed') return { paused: false };
   const job = jobs.get(id);
   if (job) {
     job.paused = true;
@@ -956,21 +1350,21 @@ async function pause(id) {
   }
   db.updateDownload(id, { status: 'paused' });
   emit('download:update', db.getDownload(id));
+  // A paused job no longer occupies a queue slot; let the next link start.
+  if (!queuePaused) pumpQueue(); else emitQueueState();
+  return { paused: true };
 }
 async function resume(id) {
+  const row = db.getDownload(id);
+  if (!row) return { started: false };
   const job = jobs.get(id);
-  // Only un-pause when the transfer is really still running; after a failure
-  // the worker loop has exited and the job has to be started again.
-  if (job && job.chunks && job.chunks.length && job.active) {
-    job.paused = false;
-    clockStart(job);
+  if (job && job.active && !job.paused) {
     db.updateDownload(id, { status: 'downloading' });
     emit('download:update', db.getDownload(id));
-    return;
+    return { started: true };
   }
-  db.updateDownload(id, { status: 'downloading' });
-  await start(id);
-  emit('download:update', db.getDownload(id));
+  // The queue decides whether there is room; if not, the job waits as queued.
+  return requestStart(id);
 }
 async function cancel(id) {
   const job = jobs.get(id);
@@ -989,6 +1383,9 @@ async function cancel(id) {
     try { fs.rmSync(row.savePath, { force: true }); } catch {}
     removePartsDir(partsDirForRow(row, id));
   }
+  // The slot was free already if nothing was running; a running job frees it
+  // from start()'s finally block once its streams have drained.
+  if (!job || !job.active) pumpQueue(); else emitQueueState();
 }
 async function remove(id, opts = {}) {
   const row = db.getDownload(id);
@@ -1006,6 +1403,7 @@ async function remove(id, opts = {}) {
   }
   db.deleteDownload(id);
   jobs.delete(id);
+  reservedSavePaths.delete(id);
   emit('download:removed', { id });
 }
 
@@ -1097,7 +1495,12 @@ async function refreshLink(id, newUrl) {
   for (const c of chunks) if (c.status === 'failed') db.updateChunk(c.id, { status: 'pending' });
   const out = db.getDownload(id);
   emit('download:update', out);
+  emitQueueState();
   return { ...out, verified: true };
 }
 
-module.exports = { init, addJob, start, pause, resume, cancel, remove, refreshLink, invalidateLimits, planChunks, planRanges };
+module.exports = {
+  init, addJob, start, pause, resume, cancel, remove, refreshLink,
+  requestStart, pumpQueue, autostart, pauseAll, resumeAll, queueState,
+  invalidateLimits, planChunks, planRanges
+};

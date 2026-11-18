@@ -239,6 +239,8 @@ body {
 
 /* Toolbar */
 .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.toolbar-end { margin-left: auto; display: flex; gap: 8px; }
+.queue-toolbar { margin-top: -6px; }
 .hint { color: var(--text-muted); font-size: 12px; }
 
 /* Empty state */
@@ -311,6 +313,7 @@ body {
 }
 @keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
 .toast.success { border-left: 3px solid var(--success); }
+.toast.info { border-left: 3px solid var(--accent); }
 .toast.error { border-left: 3px solid var(--danger); }
 
 /* scrollbar */

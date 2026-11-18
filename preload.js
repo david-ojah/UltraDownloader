@@ -16,10 +16,16 @@ contextBridge.exposeInMainWorld('api', {
     start: (id) => ipcRenderer.invoke('downloads:start', id),
     pause: (id) => ipcRenderer.invoke('downloads:pause', id),
     resume: (id) => ipcRenderer.invoke('downloads:resume', id),
+    pauseAll: () => ipcRenderer.invoke('downloads:pauseAll'),
+    resumeAll: () => ipcRenderer.invoke('downloads:resumeAll'),
+    queueState: () => ipcRenderer.invoke('downloads:queueState'),
     cancel: (id) => ipcRenderer.invoke('downloads:cancel', id),
     remove: (id, opts) => ipcRenderer.invoke('downloads:remove', id, opts),
     refreshLink: (id, url) => ipcRenderer.invoke('downloads:refreshLink', id, url),
     chooseFolder: () => ipcRenderer.invoke('downloads:chooseFolder')
+  },
+  app: {
+    info: () => ipcRenderer.invoke('app:info')
   },
   shell: {
     openPath: (p) => ipcRenderer.invoke('shell:openPath', p),
