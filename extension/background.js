@@ -1,5 +1,6 @@
-// Minimal bridge client. The content script detects a download click and asks
-// this background page to add it to the running Ultra Downloader.
+// The extension watches Firefox downloads. When Ultra Downloader is running,
+// the download is cancelled in Firefox and its URL is queued in the app. When
+// the app is not running, Firefox keeps the download untouched.
 const CLIENT_HEADER = 'X-UD-Client';
 const CLIENT_VALUE = 'ultra-downloader-firefox';
 const PORTS = [17321, 17322, 17323, 17324, 17325, 17326, 17327, 17328, 17329, 17330];
@@ -42,8 +43,8 @@ async function findBridge() {
   return null;
 }
 
-async function addUrl(url) {
-  const port = await findBridge();
+async function addUrl(url, knownPort) {
+  const port = knownPort || await findBridge();
   if (!port) return { ok: false, reason: 'not-running' };
   try {
     const res = await fetchWithTimeout(`http://127.0.0.1:${port}/add`, {
@@ -77,6 +78,9 @@ function notify(message) {
   } catch {}
 }
 
+// The content script intercepts download-page controls before Firefox sends a
+// request. This listener hands the URL straight to the app, so another download
+// manager's network driver never sees the request.
 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== 'ud:add' || typeof message.url !== 'string') {
     return false;
@@ -87,19 +91,33 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-browser.contextMenus.create({
-  id: 'ud-add-link',
-  title: 'Download with Ultra Downloader',
-  contexts: ['link']
-});
+browser.downloads.onCreated.addListener(async (item) => {
+  if (!item || !/^https?:\/\//i.test(item.url || '')) return;
 
-browser.contextMenus.onClicked.addListener((info) => {
-  if (info.menuItemId !== 'ud-add-link' || !info.linkUrl) return;
-  addUrl(info.linkUrl).then((result) => {
-    if (!result.ok) {
-      notify(result.reason === 'not-running'
-        ? 'Ultra Downloader is not running.'
-        : 'Ultra Downloader could not add this link.');
-    }
-  });
+  // Only take over when the app is already running.
+  const port = await findBridge();
+  if (!port) return;
+
+  // Stop Firefox's copy before adding, so the file is not downloaded twice.
+  try {
+    await browser.downloads.cancel(item.id);
+    await browser.downloads.erase({ id: item.id });
+  } catch {
+    // The browser download may already have finished. Leave it alone rather
+    // than adding a duplicate.
+    try {
+      const [current] = await browser.downloads.search({ id: item.id });
+      if (!current || current.state === 'complete') return;
+    } catch {}
+  }
+
+  const result = await addUrl(item.url, port);
+  if (!result.ok) {
+    // The app accepted the connection but rejected the item. Put the download
+    // back into Firefox instead of losing it.
+    try {
+      await browser.downloads.download({ url: item.url });
+    } catch {}
+    notify('Ultra Downloader could not add this download.');
+  }
 });

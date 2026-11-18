@@ -14,10 +14,9 @@ starting over.
 
 ## What's new in 1.1.0
 
-- **Firefox extension support.** A small companion extension sends download
-  links to the running app. Clicking a direct download link queues it in Ultra
-  Downloader instead of Firefox. If the app is not running, Firefox downloads
-  it normally.
+- **Firefox extension support.** A small companion extension hands Firefox
+  downloads to the running app. The download is cancelled in Firefox and queued
+  in Ultra Downloader. If the app is not running, Firefox downloads it normally.
 - **Loopback-only bridge.** The app listens on `127.0.0.1` and accepts only
   requests carrying the extension client header; normal web pages cannot add
   downloads.
@@ -109,34 +108,32 @@ folder**, or **Remove** the entry.
 
 ## Firefox extension
 
-The optional Firefox extension adds one action: clicking a direct download
-link sends it to the running Ultra Downloader queue.
+The optional Firefox extension adds one action: when Ultra Downloader is
+running, Firefox downloads are handed to the app instead of being saved by the
+browser.
 
 1. Install Ultra Downloader **1.1.0 or newer**.
 2. Install the Firefox extension from its AMO listing, or load it temporarily
    with `npx web-ext run --source-dir extension` while developing.
 3. Leave Ultra Downloader running (the window may be closed to the tray).
-4. Click a link to a file such as `.zip`, `.rar`, `.7z`, `.exe`, `.msi`, `.iso`,
-   `.mp4`, `.mkv` or `.pdf`.
+4. Click any download link, including file-host buttons whose URL has no file
+   extension.
 
 What happens:
 
-- If Ultra Downloader is running, the click is intercepted, the URL is added to
-  the queue, and Firefox does not start its own download.
+- If Ultra Downloader is running, the download is handed to the app queue and
+  Firefox's own copy is cancelled.
 - If the app is not running, the extension does nothing and Firefox downloads
   the file normally.
-- There is also a right-click fallback: **Download with Ultra Downloader** on
-  any link. This helps with file hosts whose download URL has no file
-  extension.
+- Direct download controls are intercepted before Firefox requests the file;
+  Firefox download events are used as a fallback for buttons and scripts. The
+  extension does not read page bodies, cookies or browsing history — only the
+  clicked link's label and the current page path.
 
 The extension has no popup, options page or history. It talks only to
 `127.0.0.1`; no links or browsing data leave the PC. The bridge stays available
 while Ultra Downloader is minimised or closed to the tray; it stops only when
 the app is fully quit.
-
-Known limits: downloads started by JavaScript, POST forms, redirects or
-`blob:` URLs cannot be intercepted. The context-menu fallback covers the final
-visible link where one exists.
 
 ---
 
@@ -332,6 +329,12 @@ with more room, then press **Retry**. Partial progress is preserved.
 The file host's link has expired. Use **Refresh link** with a fresh link to the
 same file.
 
+**The Firefox extension does not catch a download**
+Check whether another download manager (IDM, EagleGet, etc.) is intercepting
+Firefox downloads. If its browser integration is active, Firefox may never
+start the download, so there is nothing for the extension to hand over. Disable
+that integration and try again.
+
 **The app disappeared after I closed it**
 It is still running in the tray, and downloads continue. Double-click the tray
 icon, or launch the app again, to bring the window back. Use tray → **Quit** to
@@ -405,9 +408,9 @@ assets/                 App icon
 
 ### 1.1.0
 - Added the Firefox download-link extension and its loopback-only bridge.
-- Clicking a direct download link queues it in the running app; if the app is
-  not running, Firefox handles the download normally.
-- Added a right-click **Download with Ultra Downloader** fallback.
+- Firefox downloads are queued in the running app; if the app is not running,
+  Firefox handles the download normally.
+- Catches direct links and extensionless file-host download buttons.
 - No change to the download engine, queue, folders or data safety.
 
 ### 1.0.1R1

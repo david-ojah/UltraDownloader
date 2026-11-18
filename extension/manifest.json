@@ -17,7 +17,7 @@
     "96": "icons/icon-96.png"
   },
   "permissions": [
-    "contextMenus",
+    "downloads",
     "notifications"
   ],
   "host_permissions": [

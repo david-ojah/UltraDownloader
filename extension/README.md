@@ -1,36 +1,34 @@
 # Ultra Downloader — Firefox extension
 
-A one-purpose Firefox extension: clicking a direct download link sends it to
-the Ultra Downloader queue while the app is running.
+A one-purpose Firefox extension: when Ultra Downloader is running, Firefox
+downloads are handed to the app instead of being saved by the browser.
 
 There is no popup, options page, history or analytics. If the app is not
-running, the extension does nothing and Firefox handles the download normally.
+running, the extension does nothing and Firefox downloads normally.
 
 ## Requirements
 
-- Firefox 140 or newer
+- Firefox 142 or newer
 - Ultra Downloader 1.1.0 or newer, running (tray counts as running)
 - Windows
 
-## What it captures
+## How it works
 
-- Direct links ending in common download extensions such as `.zip`, `.rar`,
-  `.7z`, `.exe`, `.msi`, `.iso`, `.mp4`, `.mkv`, `.pdf`
-- Links with a `download` attribute
-- Any link through the right-click item **Download with Ultra Downloader**
+The extension has two complementary paths:
 
-It intentionally does not try to capture JavaScript-generated downloads, POST
-forms, redirects or `blob:` URLs.
+1. A content script intercepts clicks on direct download controls before
+   Firefox sends the request. This is what handles file-host buttons such as
+   AnkerGames' **Download Now**.
+2. A background listener watches Firefox's download events as a fallback for
+   buttons and scripts that start a download without an `<a>` click.
 
-## How it talks to the app
+Both paths check whether Ultra Downloader is running on `127.0.0.1`. If it is,
+the URL is added to the queue and Firefox's own copy is cancelled. If it is not,
+Firefox downloads normally. The extension does not read page text, cookies or
+history.
 
-The extension POSTs `{ "url": "..." }` to Ultra Downloader at
-`http://127.0.0.1:17321/add`. The app listens on loopback only and requires the
-`X-UD-Client: ultra-downloader-firefox` header. Requests from ordinary web
-pages are rejected.
-
-If the app is not running, the request fails quickly and the original Firefox
-download continues.
+If the app rejects a download after Firefox's copy was cancelled, the extension
+starts the download again in Firefox so it is not lost.
 
 ## Development
 
@@ -48,8 +46,12 @@ npx web-ext build --source-dir extension
 - Add-on ID: `ultradownloader@david-ojah.github.io`
 - Data collection: none. Declared with
   `browser_specific_settings.gecko.data_collection_permissions`.
-- `<all_urls>` is used only by the content script to observe clicks on links.
-  The extension does not read page content, cookies or history.
+- Permissions: `downloads` (to observe and cancel a download), `notifications`
+  (to report a failed handoff), `<all_urls>` (the content script only inspects
+  the clicked link and page path to recognise download controls), and
+  `http://127.0.0.1/*` (the local bridge).
+- The content script does not read page text, cookies or history. It only looks
+  at the clicked anchor's href/label and the current page path.
 - The extension requires the companion desktop app. A mock bridge is provided
   at `../tools/mock-bridge.js` for testing without installing the app:
 
@@ -59,6 +61,4 @@ npx web-ext build --source-dir extension
 
   It accepts the extension's requests and prints the URLs that would be added
   to the queue.
-- The content script prevents the browser download only after the app confirms
-  the URL was queued. If the app is unavailable, it navigates to the original
-  URL so Firefox downloads normally.
+- If the app is unavailable, the Firefox download is not cancelled.
