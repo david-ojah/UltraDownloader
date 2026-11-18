@@ -552,6 +552,19 @@ function autostart() {
   pumpQueue();
 }
 
+// Stop every live transfer for an app exit. Unlike pauseAll(), this must not
+// write a "paused" status: an installer update or a later reinstall should see
+// the download as interrupted and resume it from the part files. Active time is
+// flushed first so it survives the restart.
+function shutdown() {
+  queuePaused = true;
+  for (const [id, job] of jobs.entries()) {
+    if (!job.active || job.cancelled) continue;
+    job.paused = true;
+    try { clockStop(job, id); } catch {}
+  }
+}
+
 function pauseAll() {
   queuePaused = true;
   let paused = 0;
@@ -1501,6 +1514,6 @@ async function refreshLink(id, newUrl) {
 
 module.exports = {
   init, addJob, start, pause, resume, cancel, remove, refreshLink,
-  requestStart, pumpQueue, autostart, pauseAll, resumeAll, queueState,
+  requestStart, pumpQueue, autostart, pauseAll, resumeAll, shutdown, queueState,
   invalidateLimits, planChunks, planRanges
 };

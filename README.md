@@ -8,7 +8,21 @@ and builds the finished file only once every piece has arrived. It is designed
 to survive huge downloads, flaky links and expired file-host URLs without
 starting over.
 
-**Current version: 1.0.1**
+**Current version: 1.0.1R1**
+
+---
+
+## What's new in 1.0.1R1
+
+- **Cleaner uninstall and update.** The app is now asked to close before its
+  files are removed. It stops active transfers, saves the active-time counters
+  and lets pending part-file writes finish, then exits. If it does not close in
+  time, the installer/uninstaller closes it forcefully.
+- **Uninstalling keeps your data.** The uninstaller removes only the program,
+  its shortcuts and its Windows uninstall entry. Downloads, part files, settings
+  and download history are kept. Reinstalling brings the list back and can
+  resume unfinished downloads.
+- **Uninstall steps documented.** See [Uninstall](#uninstall) below.
 
 ---
 
@@ -50,7 +64,7 @@ No account, no background service, and no browser extension are required.
 ## Install
 
 1. Open the **Releases** page of this repository.
-2. Download `Ultra.Downloader.Setup.1.0.1.exe`.
+2. Download `Ultra.Downloader.Setup.1.0.1R1.exe`.
 3. Run the installer and choose an install folder.
 
 The installer is currently **unsigned**, so Windows SmartScreen may show
@@ -160,6 +174,57 @@ your partial download.
 - To exit completely, right-click the tray icon and choose **Quit**.
 - While a transfer is active, the app asks Windows to keep the system awake so
   a long download is not interrupted by sleep.
+
+---
+
+## Uninstall
+
+### From Windows Settings
+
+1. Open **Settings → Apps → Installed apps**.
+2. Search for **Ultra Downloader**.
+3. Open its menu and choose **Uninstall**.
+
+### From the Start menu
+
+Right-click **Ultra Downloader** and choose **Uninstall**.
+
+### Silently, from a terminal
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Ultra Downloader\Uninstall Ultra Downloader.exe" /currentuser /S
+```
+
+### What the uninstaller does
+
+1. It asks the running app to close by launching
+   `Ultra Downloader.exe --quit`.
+2. The app stops active transfers, saves the active-time counters and lets
+   pending part-file writes finish before exiting.
+3. The uninstaller waits briefly. If the app is still running (or it is an older
+   build that does not understand `--quit`), it closes it forcefully with
+   `taskkill` and continues.
+4. It removes the program files, the desktop and Start menu shortcuts, and the
+   Windows uninstall entry.
+
+### What is kept
+
+Uninstalling **never** deletes your downloads or download history. These are
+left untouched:
+
+| Path | What it contains |
+|---|---|
+| Your download folder | Finished files, including files from the Finished tab |
+| `.ud-parts` folders | Temporary parts of unfinished downloads |
+| `%APPDATA%\ultra-downloader\ultra.db` | Download list, settings and resume data |
+| `%APPDATA%\ultra-downloader\deleted.log` | Deletion and startup audit log |
+
+If you reinstall the app later, the download list and settings are still there,
+and unfinished downloads can resume from their part files.
+
+To remove the history and settings too, delete
+`%APPDATA%\ultra-downloader` after uninstalling. Do that only if you no longer
+need the download list or resume data.
 
 ---
 
@@ -277,6 +342,14 @@ assets/                 App icon
 ---
 
 ## Version history
+
+### 1.0.1R1
+- Revision of 1.0.1.
+- Installer and uninstaller now ask the app to close cleanly before removing or
+  replacing files, with a forced close only as a fallback.
+- Active transfers stop without being marked paused, so an update or reinstall
+  resumes them from their part files.
+- Uninstall documentation added, including exactly which data is preserved.
 
 ### 1.0.1
 - Working download queue with `Max concurrent jobs`, Pause all / Resume all.

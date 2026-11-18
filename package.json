@@ -1,6 +1,7 @@
 {
   "name": "ultra-downloader",
-  "version": "1.0.1",
+  "version": "1.0.1-R1",
+  "displayVersion": "1.0.1R1",
   "description": "Ultra Downloader - multi-connection download manager for Windows",
   "main": "main.js",
   "scripts": {
@@ -43,7 +44,10 @@
       "shortcutName": "Ultra Downloader",
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
-      "installerHeaderIcon": "assets/icon.ico"
+      "installerHeaderIcon": "assets/icon.ico",
+      "uninstallDisplayName": "Ultra Downloader 1.0.1R1",
+      "artifactName": "Ultra Downloader Setup 1.0.1R1.${ext}",
+      "include": "build/installer.nsh"
     }
   },
   "devDependencies": {

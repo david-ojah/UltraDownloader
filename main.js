@@ -7,6 +7,10 @@ const db = require('./src/db');
 const connections = require('./src/connections');
 const downloader = require('./src/downloader');
 
+// The npm/electron-builder version must be valid semver, so the package uses
+// 1.0.1-R1 while every user-facing label says 1.0.1R1.
+const APP_VERSION_LABEL = require('./package.json').displayVersion || app.getVersion();
+
 // Must be set early: Windows uses the AppUserModelID to resolve the Start Menu
 // shortcut (and therefore the app name/icon) shown in toast notifications.
 if (process.platform === 'win32') {
@@ -45,11 +49,15 @@ let tray = null;
 // Set when the user really quits (tray → Quit), so the close-to-tray handler
 // lets the window go instead of hiding it forever.
 let quitting = false;
+let quitTimer = null;
 // Declared before the before-quit handler is registered: a second launch calls
 // app.quit() during module load, which fires that handler immediately.
 let powerBlockerId = null;
 app.on('before-quit', () => {
   quitting = true;
+  // Stop live transfers without changing their saved status: a later launch
+  // sees them as interrupted and resumes from the part files.
+  try { downloader.shutdown(); } catch {}
   if (powerBlockerId !== null) {
     try { powerSaveBlocker.stop(powerBlockerId); } catch {}
     powerBlockerId = null;
@@ -62,6 +70,7 @@ app.on('before-quit', () => {
 // (each extra instance meant another tray icon and another process on the same
 // database).
 const singleInstanceLock = app.requestSingleInstanceLock();
+const quitRequested = process.argv.includes('--quit');
 if (!singleInstanceLock) app.quit();
 
 function showWindow() {
@@ -74,7 +83,25 @@ function showWindow() {
   mainWindow.focus();
 }
 
-app.on('second-instance', () => {
+// Ask the running copy to close cleanly. Used by the installer/uninstaller via
+// `Ultra Downloader.exe --quit`, and by the tray Quit item. A short delay lets
+// in-flight part-file writes and the database finish before the process exits.
+function requestGracefulQuit() {
+  if (quitting) return;
+  quitting = true;
+  try { downloader.shutdown(); } catch {}
+  if (quitTimer) clearTimeout(quitTimer);
+  quitTimer = setTimeout(() => {
+    quitTimer = null;
+    try { app.quit(); } catch {}
+  }, 1200);
+}
+
+app.on('second-instance', (event, argv) => {
+  if (Array.isArray(argv) && argv.includes('--quit')) {
+    requestGracefulQuit();
+    return;
+  }
   showWindow();
 });
 
@@ -226,6 +253,12 @@ function createWindow() {
 app.whenReady().then(() => {
   // A second launch has already asked to quit; never initialise a duplicate.
   if (!singleInstanceLock) return;
+  // `--quit` with no running copy just exits without opening a window.
+  if (quitRequested) {
+    quitting = true;
+    app.quit();
+    return;
+  }
   // No File/Edit/Window menu: removes full screen, zoom, reload and devtools
   // shortcuts from the app entirely.
   Menu.setApplicationMenu(null);
@@ -261,7 +294,7 @@ function createTray() {
   const menu = Menu.buildFromTemplate([
     { label: 'Show', click: () => showWindow() },
     { type: 'separator' },
-    { label: 'Quit', click: () => app.quit() }
+    { label: 'Quit', click: () => requestGracefulQuit() }
   ]);
   tray.setToolTip('Ultra Downloader');
   tray.setContextMenu(menu);
@@ -324,7 +357,7 @@ ipcMain.handle('downloads:resume', async (e, id) => downloader.resume(id));
 ipcMain.handle('downloads:pauseAll', async () => downloader.pauseAll());
 ipcMain.handle('downloads:resumeAll', async () => downloader.resumeAll());
 ipcMain.handle('downloads:queueState', async () => downloader.queueState());
-ipcMain.handle('app:info', async () => ({ version: app.getVersion(), name: app.getName() }));
+ipcMain.handle('app:info', async () => ({ version: APP_VERSION_LABEL, name: app.getName() }));
 ipcMain.handle('downloads:cancel', async (e, id) => { const r = await downloader.cancel(id); logDeletion({ action: 'cancel', id, result: 'partial-data-removed' }); return r; });
 ipcMain.handle('downloads:remove', async (e, id, opts = {}) => {
   const row = db.getDownload(id);
@@ -369,4 +402,4 @@ ipcMain.handle('downloads:chooseFolder', async () => {
 
 ipcMain.handle('shell:openPath', async (e, p) => shell.showItemInFolder(p));
 ipcMain.handle('shell:openFile', async (e, p) => shell.openPath(p));
-ipcMain.handle('app:quit', async () => app.quit());
+ipcMain.handle('app:quit', async () => requestGracefulQuit());
