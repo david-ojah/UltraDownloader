@@ -8,7 +8,22 @@ and builds the finished file only once every piece has arrived. It is designed
 to survive huge downloads, flaky links and expired file-host URLs without
 starting over.
 
-**Current version: 1.0.1R1**
+**Current version: 1.1.0**
+
+---
+
+## What's new in 1.1.0
+
+- **Firefox extension support.** A small companion extension sends download
+  links to the running app. Clicking a direct download link queues it in Ultra
+  Downloader instead of Firefox. If the app is not running, Firefox downloads
+  it normally.
+- **Loopback-only bridge.** The app listens on `127.0.0.1` and accepts only
+  requests carrying the extension client header; normal web pages cannot add
+  downloads.
+- **No new download behaviour.** Extension-added links go through the same
+  queue, folders, retries, disk checks and part-file handling as manually added
+  links.
 
 ---
 
@@ -57,14 +72,14 @@ starting over.
 - `curl.exe` — included with Windows 10 1803 and later, and with Windows 11
 - An internet connection
 
-No account, no background service, and no browser extension are required.
+No account or background service is required. The Firefox extension is optional.
 
 ---
 
 ## Install
 
 1. Open the **Releases** page of this repository.
-2. Download `Ultra.Downloader.Setup.1.0.1R1.exe`.
+2. Download `Ultra.Downloader.Setup.1.1.0.exe`.
 3. Run the installer and choose an install folder.
 
 The installer is currently **unsigned**, so Windows SmartScreen may show
@@ -89,6 +104,37 @@ folder**, or **Remove** the entry.
 
 > `Cancel` deletes the temporary part files for that download. `Remove` on a
 > finished download asks whether to keep the file or delete it too.
+
+---
+
+## Firefox extension
+
+The optional Firefox extension adds one action: clicking a direct download
+link sends it to the running Ultra Downloader queue.
+
+1. Install Ultra Downloader **1.1.0 or newer**.
+2. Install the Firefox extension from its AMO listing, or load it temporarily
+   with `npx web-ext run --source-dir extension` while developing.
+3. Leave Ultra Downloader running (the window may be closed to the tray).
+4. Click a link to a file such as `.zip`, `.rar`, `.7z`, `.exe`, `.msi`, `.iso`,
+   `.mp4`, `.mkv` or `.pdf`.
+
+What happens:
+
+- If Ultra Downloader is running, the click is intercepted, the URL is added to
+  the queue, and Firefox does not start its own download.
+- If the app is not running, the extension does nothing and Firefox downloads
+  the file normally.
+- There is also a right-click fallback: **Download with Ultra Downloader** on
+  any link. This helps with file hosts whose download URL has no file
+  extension.
+
+The extension has no popup, options page or history. It talks only to
+`127.0.0.1`; no links or browsing data leave the PC.
+
+Known limits: downloads started by JavaScript, POST forms, redirects or
+`blob:` URLs cannot be intercepted. The context-menu fallback covers the final
+visible link where one exists.
 
 ---
 
@@ -319,6 +365,16 @@ npm run dist
 
 The installer is written to `dist\Ultra Downloader Setup <version>.exe`.
 
+The Firefox extension is plain JavaScript with no build step:
+
+```powershell
+# Run it in a temporary Firefox profile
+npx web-ext run --source-dir extension
+
+# Package it for AMO
+npx web-ext build --source-dir extension
+```
+
 The app is built with Electron and uses the system `curl.exe` for range
 requests. Node.js 20 or newer is recommended for building.
 
@@ -336,12 +392,21 @@ src/linkgrabber.js      Scans a web page for downloadable links
 renderer/index.html     App shell and tabs
 renderer/renderer.js    Cards, queue state, settings UI
 renderer/styles.css     Theme and layout
+extension/              Firefox download-link extension
+src/bridge.js           Loopback bridge for the extension
 assets/                 App icon
 ```
 
 ---
 
 ## Version history
+
+### 1.1.0
+- Added the Firefox download-link extension and its loopback-only bridge.
+- Clicking a direct download link queues it in the running app; if the app is
+  not running, Firefox handles the download normally.
+- Added a right-click **Download with Ultra Downloader** fallback.
+- No change to the download engine, queue, folders or data safety.
 
 ### 1.0.1R1
 - Revision of 1.0.1.

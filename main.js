@@ -6,9 +6,10 @@ const os = require('os');
 const db = require('./src/db');
 const connections = require('./src/connections');
 const downloader = require('./src/downloader');
+const bridge = require('./src/bridge');
 
-// The npm/electron-builder version must be valid semver, so the package uses
-// 1.0.1-R1 while every user-facing label says 1.0.1R1.
+// The package version is kept semver-valid; displayVersion is an optional
+// user-facing label for revisions such as 1.0.1R1.
 const APP_VERSION_LABEL = require('./package.json').displayVersion || app.getVersion();
 
 // Must be set early: Windows uses the AppUserModelID to resolve the Start Menu
@@ -55,6 +56,7 @@ let quitTimer = null;
 let powerBlockerId = null;
 app.on('before-quit', () => {
   quitting = true;
+  try { bridge.stop(); } catch {}
   // Stop live transfers without changing their saved status: a later launch
   // sees them as interrupted and resumes from the part files.
   try { downloader.shutdown(); } catch {}
@@ -267,6 +269,15 @@ app.whenReady().then(() => {
   downloader.init((channel, payload) => {
     sendToRenderer(channel, payload);
     try { handleDownloaderEvent(channel, payload); } catch {}
+  });
+  // Firefox extension bridge: loopback-only and origin-gated.
+  bridge.start({
+    addJob: (url) => downloader.addJob(url),
+    version: APP_VERSION_LABEL
+  }).then(({ port }) => {
+    console.log(`Browser bridge listening on 127.0.0.1:${port}`);
+  }).catch((e) => {
+    console.error('Browser bridge failed to start:', e && e.message ? e.message : e);
   });
   // Anything left mid-flight goes back through the queue, so the concurrency
   // limit is honoured after a restart too.
