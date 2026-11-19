@@ -490,6 +490,7 @@ async function loadSettings() {
   // convert stored kbps to selected unit for display
   const gKbps = parseInt(settings.globalSpeedLimitKbps || '0', 10) || 0;
   $('#setGlobalSpeed').value = unit === 'mbs' ? (gKbps / 8000) : (gKbps / 1000);
+  $('#setAutoUpdates').checked = String(settings.autoCheckUpdates || '1') === '1';
   queueState.max = parseInt(settings.maxConcurrentJobs || '3', 10) || 3;
   renderQueueState();
 }
@@ -501,6 +502,47 @@ $('#setTempDirBtn').addEventListener('click', async () => {
   const folder = await window.api.downloads.chooseFolder();
   if (folder) $('#setTempDir').value = folder;
 });
+function renderUpdateStatus(s) {
+  if (!s) return;
+  $('#updateStatusText').textContent = s.message || 'No update check yet.';
+  const progress = $('#updateProgress');
+  if (s.state === 'downloading' && Number(s.percent) > 0) {
+    progress.style.display = 'block';
+    progress.value = Number(s.percent) || 0;
+  } else {
+    progress.style.display = 'none';
+  }
+  $('#installUpdateBtn').style.display = s.state === 'ready' ? 'inline-flex' : 'none';
+}
+
+$('#setAutoUpdates').addEventListener('change', async () => {
+  const enabled = $('#setAutoUpdates').checked ? '1' : '0';
+  try {
+    await window.api.settings.set({ autoCheckUpdates: enabled });
+    settings.autoCheckUpdates = enabled;
+    toast(enabled === '1' ? 'Update checks enabled at startup' : 'Startup update checks disabled');
+  } catch (e) {
+    $('#setAutoUpdates').checked = !$('#setAutoUpdates').checked;
+    toast(String((e && e.message) || e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''));
+  }
+});
+$('#checkUpdatesBtn').addEventListener('click', async () => {
+  try {
+    const s = await window.api.updater.check();
+    renderUpdateStatus(s);
+  } catch (e) {
+    toast(String((e && e.message) || e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''));
+  }
+});
+$('#installUpdateBtn').addEventListener('click', async () => {
+  try {
+    await window.api.updater.install();
+  } catch (e) {
+    toast(String((e && e.message) || e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''));
+  }
+});
+$('#openReleasesBtn').addEventListener('click', () => window.api.updater.openReleases());
+
 $('#saveSettings').addEventListener('click', async () => {
   const unit = $('#setSpeedUnit').value;
   const gVal = parseFloat($('#setGlobalSpeed').value) || 0;
@@ -553,6 +595,7 @@ window.api.on('queue:update', (s) => {
   queueState = { ...queueState, ...s };
   renderQueueState();
 });
+window.api.on('update:status', (s) => renderUpdateStatus(s));
 window.api.on('connections:update', (list) => {
   if (Array.isArray(list)) connections = list;
   renderConnections(list);
@@ -577,5 +620,8 @@ window.api.on('speeds:update', (arr) => {
   try {
     const info = await window.api.app.info();
     $('#appVersion').textContent = info && info.version ? `Ready · v${info.version}` : 'Ready';
+  } catch {}
+  try {
+    renderUpdateStatus(await window.api.updater.status());
   } catch {}
 })();

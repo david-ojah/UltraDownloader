@@ -17,6 +17,11 @@
     "appId": "com.ultradownloader.app",
     "productName": "Ultra Downloader",
     "copyright": "Copyright © 2026 Ultra Downloader",
+    "publish": {
+      "provider": "github",
+      "owner": "david-ojah",
+      "repo": "UltraDownloader"
+    },
     "directories": {
       "output": "dist"
     },
@@ -45,7 +50,7 @@
       "uninstallerIcon": "assets/icon.ico",
       "installerHeaderIcon": "assets/icon.ico",
       "uninstallDisplayName": "Ultra Downloader ${version}",
-      "artifactName": "Ultra Downloader Setup ${version}.${ext}",
+      "artifactName": "Ultra.Downloader.Setup.${version}.${ext}",
       "include": "build/installer.nsh"
     }
   },
@@ -54,6 +59,7 @@
     "electron-builder": "^26.18.0"
   },
   "dependencies": {
-    "better-sqlite3": "^13.1.1"
+    "better-sqlite3": "^13.1.1",
+    "electron-updater": "^6.8.11"
   }
 }

@@ -9,7 +9,7 @@ running, the extension does nothing and Firefox downloads normally.
 ## Requirements
 
 - Firefox 142 or newer
-- Ultra Downloader 1.1.0 or newer, running (tray counts as running)
+- Ultra Downloader 1.2.0 or newer, running (tray counts as running)
 - Windows
 
 ## How it works

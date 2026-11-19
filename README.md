@@ -14,15 +14,16 @@ starting over.
 
 ## What's new in 1.1.0
 
-- **Firefox extension support.** A small companion extension hands Firefox
-  downloads to the running app. The download is cancelled in Firefox and queued
-  in Ultra Downloader. If the app is not running, Firefox downloads it normally.
-- **Loopback-only bridge.** The app listens on `127.0.0.1` and accepts only
-  requests carrying the extension client header; normal web pages cannot add
-  downloads.
-- **No new download behaviour.** Extension-added links go through the same
-  queue, folders, retries, disk checks and part-file handling as manually added
-  links.
+- **Self-updater.** The app checks once at startup, and **Settings → Updates**
+  has a **Check now** button. You are asked before an update is downloaded and
+  asked again before it is installed.
+- **No silent installs.** Closing the app never installs an update on its own.
+  If you choose **Later**, the app keeps running and the update stays ready to
+  install from Settings or the tray.
+- **Updates preserve your data.** The installer closes active transfers cleanly;
+  downloads, part files, settings and history are kept.
+- The Firefox extension bridge is present in the code but **disabled in 1.1.0**.
+  It is enabled in 1.2.0 once the signed extension is available on AMO.
 
 ---
 
@@ -106,13 +107,13 @@ folder**, or **Remove** the entry.
 
 ---
 
-## Firefox extension
+## Firefox extension (coming in 1.2.0)
 
 The optional Firefox extension adds one action: when Ultra Downloader is
 running, Firefox downloads are handed to the app instead of being saved by the
-browser.
+browser. The bridge is disabled in 1.1.0; this feature is enabled in 1.2.0.
 
-1. Install Ultra Downloader **1.1.0 or newer**.
+1. Install Ultra Downloader **1.2.0 or newer**.
 2. Install the Firefox extension from its AMO listing, or load it temporarily
    with `npx web-ext run --source-dir extension` while developing.
 3. Leave Ultra Downloader running (the window may be closed to the tray).
@@ -313,9 +314,11 @@ need the download list or resume data.
 | Max streams per adapter | 32 | Hard limit for streams on a single adapter. |
 | Global speed limit | 0 (unlimited) | Total download speed cap. 0 means no limit. |
 | Speed unit | Mbps | How speeds are displayed (Mbps or MB/s). |
+| Check for updates at startup | On | Check once when the app starts. **Check now** is always available in Settings. |
 
 Settings are saved with **Save Settings**. Both folders are created and checked
-when you save, so a typo is reported immediately.
+when you save, so a typo is reported immediately. The update preference saves
+immediately when toggled.
 
 ---
 
@@ -368,7 +371,8 @@ npm start
 npm run dist
 ```
 
-The installer is written to `dist\Ultra Downloader Setup <version>.exe`.
+The installer is written to `dist\Ultra.Downloader.Setup.<version>.exe`.
+The updater metadata is written to `dist\latest.yml`.
 
 The Firefox extension is plain JavaScript with no build step:
 
@@ -382,6 +386,19 @@ npx web-ext build --source-dir extension
 
 The app is built with Electron and uses the system `curl.exe` for range
 requests. Node.js 20 or newer is recommended for building.
+
+## Publishing an update
+
+1. Increase `version` in `package.json`.
+2. Run `npm run dist`.
+3. Create the GitHub release for `v<version>`.
+4. Upload **both**:
+   - `dist\Ultra.Downloader.Setup.<version>.exe`
+   - `dist\latest.yml`
+5. Do not upload an older `latest.yml` to a newer release.
+
+The installed app reads `latest.yml` from the latest public GitHub release. It
+asks before downloading and asks again before installing.
 
 ---
 
@@ -397,8 +414,9 @@ src/linkgrabber.js      Scans a web page for downloadable links
 renderer/index.html     App shell and tabs
 renderer/renderer.js    Cards, queue state, settings UI
 renderer/styles.css     Theme and layout
-extension/              Firefox download-link extension
+extension/              Firefox download-link extension (enabled in 1.2.0)
 src/bridge.js           Loopback bridge for the extension
+src/updater.js          Startup/manual update checks and install prompts
 assets/                 App icon
 ```
 
@@ -407,10 +425,10 @@ assets/                 App icon
 ## Version history
 
 ### 1.1.0
-- Added the Firefox download-link extension and its loopback-only bridge.
-- Firefox downloads are queued in the running app; if the app is not running,
-  Firefox handles the download normally.
-- Catches direct links and extensionless file-host download buttons.
+- Added the self-updater with startup and manual checks.
+- Prompts before downloading and before installing an update.
+- Added `latest.yml` update metadata to the release process.
+- The Firefox extension bridge is present but disabled until 1.2.0.
 - No change to the download engine, queue, folders or data safety.
 
 ### 1.0.1R1

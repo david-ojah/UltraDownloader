@@ -27,6 +27,12 @@ contextBridge.exposeInMainWorld('api', {
   app: {
     info: () => ipcRenderer.invoke('app:info')
   },
+  updater: {
+    check: () => ipcRenderer.invoke('app:updateCheck'),
+    status: () => ipcRenderer.invoke('app:updateStatus'),
+    install: () => ipcRenderer.invoke('app:updateInstall'),
+    openReleases: () => ipcRenderer.invoke('app:updateOpenReleases')
+  },
   shell: {
     openPath: (p) => ipcRenderer.invoke('shell:openPath', p),
     openFile: (p) => ipcRenderer.invoke('shell:openFile', p)

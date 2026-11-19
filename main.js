@@ -7,6 +7,7 @@ const db = require('./src/db');
 const connections = require('./src/connections');
 const downloader = require('./src/downloader');
 const bridge = require('./src/bridge');
+const updater = require('./src/updater');
 
 // The package version is kept semver-valid; displayVersion is an optional
 // user-facing label for revisions such as 1.0.1R1.
@@ -270,15 +271,20 @@ app.whenReady().then(() => {
     sendToRenderer(channel, payload);
     try { handleDownloaderEvent(channel, payload); } catch {}
   });
-  // Firefox extension bridge: loopback-only and origin-gated.
-  bridge.start({
-    addJob: (url) => downloader.addJob(url),
-    version: APP_VERSION_LABEL
-  }).then(({ port }) => {
-    console.log(`Browser bridge listening on 127.0.0.1:${port}`);
-  }).catch((e) => {
-    console.error('Browser bridge failed to start:', e && e.message ? e.message : e);
-  });
+  // Firefox extension bridge: loopback-only and origin-gated. 1.1.0 ships the
+  // code but keeps it off until the signed extension is available (1.2.0).
+  if (String(db.getSettings().browserBridgeEnabled || '0') === '1') {
+    bridge.start({
+      addJob: (url) => downloader.addJob(url),
+      version: APP_VERSION_LABEL
+    }).then(({ port }) => {
+      console.log(`Browser bridge listening on 127.0.0.1:${port}`);
+    }).catch((e) => {
+      console.error('Browser bridge failed to start:', e && e.message ? e.message : e);
+    });
+  } else {
+    console.log('Browser bridge disabled (browserBridgeEnabled=0)');
+  }
   // Anything left mid-flight goes back through the queue, so the concurrency
   // limit is honoured after a restart too.
   setTimeout(() => {
@@ -286,6 +292,19 @@ app.whenReady().then(() => {
   }, 1000);
   createWindow();
   createTray();
+  updater.init({
+    getWindow: () => mainWindow,
+    showWindow,
+    sendToRenderer: (channel, payload) => {
+      sendToRenderer(channel, payload);
+      if (channel === 'update:status') rebuildTrayMenu();
+    },
+    beforeInstall: () => {
+      quitting = true;
+      try { bridge.stop(); } catch {}
+      try { downloader.shutdown(); } catch {}
+    }
+  });
   // Seed the signature, then poll so hot-plugged adapters show up on their own.
   pollConnections().then(() => setInterval(pollConnections, 5000));
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) showWindow(); });
@@ -302,14 +321,26 @@ function createTray() {
   } catch (e) {
     return;
   }
-  const menu = Menu.buildFromTemplate([
-    { label: 'Show', click: () => showWindow() },
-    { type: 'separator' },
-    { label: 'Quit', click: () => requestGracefulQuit() }
-  ]);
   tray.setToolTip('Ultra Downloader');
-  tray.setContextMenu(menu);
+  rebuildTrayMenu();
   tray.on('double-click', () => showWindow());
+}
+
+function rebuildTrayMenu() {
+  if (!tray) return;
+  const items = [
+    { label: 'Show', click: () => showWindow() },
+    { label: 'Check for updates', click: () => updater.check(true).catch(() => {}) }
+  ];
+  const st = updater.getStatus();
+  if (st.state === 'ready') {
+    items.push({
+      label: st.version ? `Install update ${st.version}` : 'Install downloaded update',
+      click: () => updater.install().catch(() => {})
+    });
+  }
+  items.push({ type: 'separator' }, { label: 'Quit', click: () => requestGracefulQuit() });
+  tray.setContextMenu(Menu.buildFromTemplate(items));
 }
 
 function sendToRenderer(channel, payload) {
@@ -369,6 +400,10 @@ ipcMain.handle('downloads:pauseAll', async () => downloader.pauseAll());
 ipcMain.handle('downloads:resumeAll', async () => downloader.resumeAll());
 ipcMain.handle('downloads:queueState', async () => downloader.queueState());
 ipcMain.handle('app:info', async () => ({ version: APP_VERSION_LABEL, name: app.getName() }));
+ipcMain.handle('app:updateCheck', async () => updater.check(true));
+ipcMain.handle('app:updateStatus', async () => updater.getStatus());
+ipcMain.handle('app:updateInstall', async () => updater.install());
+ipcMain.handle('app:updateOpenReleases', async () => updater.openReleases());
 ipcMain.handle('downloads:cancel', async (e, id) => { const r = await downloader.cancel(id); logDeletion({ action: 'cancel', id, result: 'partial-data-removed' }); return r; });
 ipcMain.handle('downloads:remove', async (e, id, opts = {}) => {
   const row = db.getDownload(id);

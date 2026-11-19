@@ -87,7 +87,13 @@ function init() {
     maxStreamsPerConnection: '32',
     maxConnectionsPerDownload: '4',
     globalSpeedLimitKbps: '0',
-    speedUnit: 'mbps'
+    speedUnit: 'mbps',
+    // 1.1.0 ships the bridge code but keeps the browser feature disabled until
+    // the signed Firefox extension is available.
+    browserBridgeEnabled: '0',
+    autoCheckUpdates: '1',
+    updateSkipVersion: '',
+    updateLastCheck: ''
   };
   const ins = db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)');
   for (const [k, v] of Object.entries(defaults)) ins.run(k, v);

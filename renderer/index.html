@@ -158,6 +158,24 @@
           </p>
           <button id="saveSettings" class="btn primary">Save Settings</button>
         </div>
+
+        <div class="settings-card" style="margin-top:16px">
+          <div class="settings-group">
+            <label class="check-row">
+              <input type="checkbox" id="setAutoUpdates" />
+              <span>Check for updates at startup</span>
+            </label>
+          </div>
+          <div class="settings-group">
+            <div class="input-row">
+              <button id="checkUpdatesBtn" class="btn ghost">Check now</button>
+              <button id="installUpdateBtn" class="btn primary" style="display:none">Install update</button>
+              <button id="openReleasesBtn" class="btn ghost">Releases page</button>
+            </div>
+            <p class="settings-hint" id="updateStatusText">No update check yet.</p>
+            <progress id="updateProgress" max="100" value="0" style="display:none"></progress>
+          </div>
+        </div>
       </section>
     </div>
   </main>
