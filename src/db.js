@@ -88,9 +88,8 @@ function init() {
     maxConnectionsPerDownload: '4',
     globalSpeedLimitKbps: '0',
     speedUnit: 'mbps',
-    // 1.1.0 ships the bridge code but keeps the browser feature disabled until
-    // the signed Firefox extension is available.
-    browserBridgeEnabled: '0',
+    // 1.2.0 enables the Firefox bridge; 1.1.0 shipped it disabled.
+    browserBridgeEnabled: '1',
     autoCheckUpdates: '1',
     updateSkipVersion: '',
     updateLastCheck: ''
@@ -101,6 +100,12 @@ function init() {
   if (!db.prepare("SELECT value FROM settings WHERE key='mig_chunk512'").get()) {
     db.prepare("UPDATE settings SET value='512' WHERE key='maxChunkSizeMB' AND value='64'").run();
     db.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('mig_chunk512','1')").run();
+  }
+  // 1.1.0 wrote browserBridgeEnabled=0. 1.2.0 turns the bridge on once for
+  // existing installs as well as new ones.
+  if (!db.prepare("SELECT value FROM settings WHERE key='mig_bridge_enabled'").get()) {
+    db.prepare("UPDATE settings SET value='1' WHERE key='browserBridgeEnabled'").run();
+    db.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('mig_bridge_enabled','1')").run();
   }
 }
 

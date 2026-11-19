@@ -8,7 +8,21 @@ and builds the finished file only once every piece has arrived. It is designed
 to survive huge downloads, flaky links and expired file-host URLs without
 starting over.
 
-**Current version: 1.1.0**
+**Current version: 1.2.0**
+
+---
+
+## What's new in 1.2.0
+
+- **Firefox extension support is enabled.** When Ultra Downloader is running,
+  Firefox downloads are handed to the app instead of being saved by the
+  browser.
+- **The bridge is on by default** for both new installs and upgrades from
+  1.1.0.
+- **Direct links and extensionless file-host buttons** are supported.
+- If the app is not running, Firefox downloads normally.
+- The extension remains a companion to the 1.2.0 app; see the Firefox
+  extension section below.
 
 ---
 
@@ -79,7 +93,7 @@ No account or background service is required. The Firefox extension is optional.
 ## Install
 
 1. Open the **Releases** page of this repository.
-2. Download `Ultra.Downloader.Setup.1.1.0.exe`.
+2. Download `Ultra.Downloader.Setup.1.2.0.exe`.
 3. Run the installer and choose an install folder.
 
 The installer is currently **unsigned**, so Windows SmartScreen may show
@@ -107,11 +121,11 @@ folder**, or **Remove** the entry.
 
 ---
 
-## Firefox extension (coming in 1.2.0)
+## Firefox extension
 
 The optional Firefox extension adds one action: when Ultra Downloader is
 running, Firefox downloads are handed to the app instead of being saved by the
-browser. The bridge is disabled in 1.1.0; this feature is enabled in 1.2.0.
+browser.
 
 1. Install Ultra Downloader **1.2.0 or newer**.
 2. Install the Firefox extension from its AMO listing, or load it temporarily
@@ -423,6 +437,13 @@ assets/                 App icon
 ---
 
 ## Version history
+
+### 1.2.0
+- Enabled the Firefox download bridge by default.
+- Added migration so upgrades from 1.1.0 enable the bridge automatically.
+- Firefox downloads are queued in the running app; if the app is not running,
+  Firefox handles them normally.
+- Direct links and extensionless file-host download buttons are supported.
 
 ### 1.1.0
 - Added the self-updater with startup and manual checks.
