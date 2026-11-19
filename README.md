@@ -440,6 +440,12 @@ assets/                 App icon
 
 ---
 
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+---
+
 ## Version history
 
 ### 1.2.0
