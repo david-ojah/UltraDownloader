@@ -8,6 +8,7 @@ const connections = require('./src/connections');
 const downloader = require('./src/downloader');
 const bridge = require('./src/bridge');
 const updater = require('./src/updater');
+const firefox = require('./src/firefox');
 
 // The package version is kept semver-valid; displayVersion is an optional
 // user-facing label for revisions such as 1.0.1R1.
@@ -293,6 +294,7 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
   updater.init({
+    autoCheck: false,
     getWindow: () => mainWindow,
     showWindow,
     sendToRenderer: (channel, payload) => {
@@ -305,6 +307,15 @@ app.whenReady().then(() => {
       try { downloader.shutdown(); } catch {}
     }
   });
+  // On the first 1.2.0 launch, offer the Firefox extension once the AMO
+  // listing is public. Wait for that prompt before checking for app updates so
+  // two modal dialogs cannot overlap.
+  setTimeout(async () => {
+    try { await firefox.promptIfNeeded(mainWindow, showWindow); } catch {}
+    if (String(db.getSettings().autoCheckUpdates || '1') === '1') {
+      try { await updater.check(false); } catch {}
+    }
+  }, 2500);
   // Seed the signature, then poll so hot-plugged adapters show up on their own.
   pollConnections().then(() => setInterval(pollConnections, 5000));
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) showWindow(); });
@@ -404,6 +415,7 @@ ipcMain.handle('app:updateCheck', async () => updater.check(true));
 ipcMain.handle('app:updateStatus', async () => updater.getStatus());
 ipcMain.handle('app:updateInstall', async () => updater.install());
 ipcMain.handle('app:updateOpenReleases', async () => updater.openReleases());
+ipcMain.handle('app:openExtension', async () => firefox.openExtensionPage());
 ipcMain.handle('downloads:cancel', async (e, id) => { const r = await downloader.cancel(id); logDeletion({ action: 'cancel', id, result: 'partial-data-removed' }); return r; });
 ipcMain.handle('downloads:remove', async (e, id, opts = {}) => {
   const row = db.getDownload(id);

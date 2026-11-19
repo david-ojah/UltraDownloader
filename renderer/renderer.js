@@ -542,6 +542,14 @@ $('#installUpdateBtn').addEventListener('click', async () => {
   }
 });
 $('#openReleasesBtn').addEventListener('click', () => window.api.updater.openReleases());
+$('#getFirefoxExtension').addEventListener('click', async () => {
+  try {
+    const r = await window.api.firefox.openExtension();
+    if (!r || !r.opened) toast('Could not open the extension page');
+  } catch (e) {
+    toast(String((e && e.message) || e));
+  }
+});
 
 $('#saveSettings').addEventListener('click', async () => {
   const unit = $('#setSpeedUnit').value;

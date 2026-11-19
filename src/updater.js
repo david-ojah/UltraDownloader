@@ -255,7 +255,8 @@ function init(options = {}) {
     setStatus({ state: 'error', message });
   });
 
-  if (String(db.getSettings().autoCheckUpdates || '1') === '1') {
+  if (options.autoCheck !== false &&
+      String(db.getSettings().autoCheckUpdates || '1') === '1') {
     setTimeout(() => { check(false).catch(() => {}); }, 5000);
   }
 }

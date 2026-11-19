@@ -20,9 +20,11 @@ starting over.
 - **The bridge is on by default** for both new installs and upgrades from
   1.1.0.
 - **Direct links and extensionless file-host buttons** are supported.
+- **First-run prompt.** The first time 1.2.0 starts, it offers to install the
+  Firefox extension and opens the AMO page if you say Yes.
+- **Settings → Firefox extension → Get Firefox extension** opens the same page
+  later.
 - If the app is not running, Firefox downloads normally.
-- The extension remains a companion to the 1.2.0 app; see the Firefox
-  extension section below.
 
 ---
 
@@ -128,8 +130,9 @@ running, Firefox downloads are handed to the app instead of being saved by the
 browser.
 
 1. Install Ultra Downloader **1.2.0 or newer**.
-2. Install the Firefox extension from its AMO listing, or load it temporarily
-   with `npx web-ext run --source-dir extension` while developing.
+2. On first launch, say **Yes** to the Firefox extension prompt, or use
+   **Settings → Firefox extension → Get Firefox extension**. You can also load
+   it temporarily with `npx web-ext run --source-dir extension` for development.
 3. Leave Ultra Downloader running (the window may be closed to the tray).
 4. Click any download link, including file-host buttons whose URL has no file
    extension.
@@ -430,6 +433,7 @@ renderer/renderer.js    Cards, queue state, settings UI
 renderer/styles.css     Theme and layout
 extension/              Firefox download-link extension (enabled in 1.2.0)
 src/bridge.js           Loopback bridge for the extension
+src/firefox.js          First-run extension prompt and AMO page launcher
 src/updater.js          Startup/manual update checks and install prompts
 assets/                 App icon
 ```
@@ -441,6 +445,8 @@ assets/                 App icon
 ### 1.2.0
 - Enabled the Firefox download bridge by default.
 - Added migration so upgrades from 1.1.0 enable the bridge automatically.
+- Added a first-run prompt to install the Firefox extension, plus a Settings
+  button for later.
 - Firefox downloads are queued in the running app; if the app is not running,
   Firefox handles them normally.
 - Direct links and extensionless file-host download buttons are supported.

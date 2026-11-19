@@ -33,6 +33,9 @@ contextBridge.exposeInMainWorld('api', {
     install: () => ipcRenderer.invoke('app:updateInstall'),
     openReleases: () => ipcRenderer.invoke('app:updateOpenReleases')
   },
+  firefox: {
+    openExtension: () => ipcRenderer.invoke('app:openExtension')
+  },
   shell: {
     openPath: (p) => ipcRenderer.invoke('shell:openPath', p),
     openFile: (p) => ipcRenderer.invoke('shell:openFile', p)
