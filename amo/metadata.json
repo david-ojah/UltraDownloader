@@ -1,0 +1,30 @@
+{
+  "name": {
+    "en-US": "Ultra Downloader"
+  },
+  "summary": {
+    "en-US": "Hand Firefox downloads to the Ultra Downloader app."
+  },
+  "description": {
+    "en-US": "Ultra Downloader is the companion extension for the Ultra Downloader desktop app on Windows.\n\nWhen Ultra Downloader is running, clicking a download link or file-host Download button hands the URL to the app and cancels Firefox's own copy. If the app is not running, nothing is intercepted and Firefox downloads normally.\n\n- Direct links and extensionless file-host buttons\n- No popup, options page, history or analytics\n- Local loopback connection only (127.0.0.1)\n- Requires Ultra Downloader 1.2.0 or newer"
+  },
+  "slug": "ultra-downloader",
+  "default_locale": "en-US",
+  "categories": {
+    "firefox": [
+      "download-management"
+    ]
+  },
+  "homepage": {
+    "en-US": "https://github.com/david-ojah/UltraDownloader"
+  },
+  "support_url": {
+    "en-US": "https://github.com/david-ojah/UltraDownloader/issues"
+  },
+  "version": {
+    "license": "MIT",
+    "release_notes": {
+      "en-US": "Initial release. Sends Firefox downloads to the Ultra Downloader desktop app when it is running."
+    }
+  }
+}
