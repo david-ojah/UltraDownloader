@@ -28,6 +28,9 @@ starting over.
 - **Update banner on every tab.** As soon as a new release is found, a banner
   appears with **Download update**, **Install now** and **Dismiss** actions.
   Dismissing hides it for that version only.
+- **No automatic update dialogs.** The banner is the notification; the
+  confirmation dialogs appear only when you click **Download update** or
+  **Install now**.
 - **Updates are found while the app is running.** A Firebase Realtime Database
   signal (backed by a 30-minute check and a check when the window regains
   focus) triggers the banner without needing a restart.
@@ -480,6 +483,8 @@ MIT. See [LICENSE](LICENSE).
 - Direct links and extensionless file-host download buttons are supported.
 - Added an all-tabs update banner with Download, Install, Releases and Dismiss
   actions.
+- Removed the automatic update-available and update-downloaded dialogs; the
+  banner is the only notification and consent dialogs open on click.
 - Added a Firebase Realtime Database notification plus a 30-minute fallback
   check and a check on window focus, so new releases are noticed without a
   restart.

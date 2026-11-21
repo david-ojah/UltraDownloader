@@ -76,8 +76,8 @@ async function askDownload(info) {
   });
   if (result.response === 0) {
     setStatus({ state: 'downloading', message: `Downloading ${info.version}…`, version: info.version, percent: 0 });
-    // Do not await this: update-downloaded must be able to prompt as soon as
-    // the download finishes.
+    // Run in the background: the banner follows download-progress and the
+    // update-downloaded event without blocking the dialog's close.
     autoUpdater.downloadUpdate().catch((e) => {
       setStatus({ state: 'error', message: `Could not download the update: ${e.message}` });
       logLine(`download failed: ${e.stack || e.message}`);
@@ -266,17 +266,16 @@ function init(options = {}) {
     setStatus({ state: 'checking', message: 'Checking for updates…' });
   });
 
-  autoUpdater.on('update-available', async (info) => {
+  autoUpdater.on('update-available', (info) => {
     availableInfo = info;
     const skip = String(db.getSettings().updateSkipVersion || '');
     if (!manualCheck && skip && skip === info.version) {
       setStatus({ state: 'skipped', message: `Version ${info.version} skipped.`, version: info.version });
       return;
     }
-    if (promptOpen) return;
-    promptOpen = true;
+    // The banner is the notification. Consent is requested when the user
+    // clicks Download update, so no dialog opens on its own.
     setStatus({ state: 'available', message: `Version ${info.version} is available.`, version: info.version });
-    try { await askDownload(info); } finally { promptOpen = false; }
   });
 
   autoUpdater.on('update-not-available', async (info) => {
@@ -301,15 +300,11 @@ function init(options = {}) {
     });
   });
 
-  autoUpdater.on('update-downloaded', async (info) => {
+  autoUpdater.on('update-downloaded', (info) => {
     downloadedInfo = info;
+    // Ready state shows the banner's Install button. The confirmation dialog
+    // opens only when the user clicks it.
     setStatus({ state: 'ready', message: `Version ${info.version} is ready to install.`, version: info.version, percent: 100 });
-    if (promptOpen) return;
-    promptOpen = true;
-    // Let the download prompt's final click settle before showing another
-    // modal in the same place.
-    await new Promise((r) => setTimeout(r, 700));
-    try { await askInstall(info); } finally { promptOpen = false; }
   });
 
   autoUpdater.on('error', (e) => {
