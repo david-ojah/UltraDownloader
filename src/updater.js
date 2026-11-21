@@ -17,6 +17,14 @@ let manualCheck = false;
 let promptOpen = false;
 let availableInfo = null;
 let downloadedInfo = null;
+let lastAutoCheck = 0;
+let pollTimer = null;
+
+// The Firebase listener can ask for a check at any time. This is the fallback
+// path when that listener is offline, unavailable, or the release workflow
+// failed to publish the version pointer.
+const BACKGROUND_POLL_MS = 30 * 60 * 1000;
+const FOCUS_CHECK_MIN_MS = 10 * 60 * 1000;
 
 let status = {
   state: 'idle',
@@ -128,6 +136,12 @@ async function install() {
 
 async function check(manual = false) {
   if (checkInFlight || promptOpen) return status;
+  // Never let a background/poll/realtime check wipe out an update that is
+  // already downloading or ready to install. Only an explicit "Check now"
+  // may run in those states.
+  if (!manual && ['downloading', 'ready', 'installing'].includes(status.state)) {
+    return status;
+  }
   manualCheck = !!manual;
   if (!app.isPackaged && !process.env.UD_UPDATE_URL) {
     if (manual) {
@@ -143,6 +157,7 @@ async function check(manual = false) {
   }
 
   checkInFlight = true;
+  if (!manual) lastAutoCheck = Date.now();
   setStatus({ state: 'checking', message: 'Checking for updates…' });
   try {
     const result = await autoUpdater.checkForUpdates();
@@ -166,6 +181,54 @@ async function check(manual = false) {
     saveSetting('updateLastCheck', String(Date.now()));
   }
   return status;
+}
+
+// Called on window focus and by the Firebase listener. Throttled so focus
+// changes and duplicate realtime events cannot hammer the GitHub API.
+function maybeCheck() {
+  if (String(db.getSettings().autoCheckUpdates || '1') !== '1') return status;
+  if (Date.now() - lastAutoCheck < FOCUS_CHECK_MIN_MS) return status;
+  return check(false);
+}
+
+// Start the download from the banner. Consent still goes through the same
+// dialog used by the startup flow.
+async function download() {
+  if (!availableInfo) return { ok: false, error: 'No update is available yet.' };
+  if (promptOpen) return { ok: false, error: 'A dialog is already open.' };
+  if (status.state === 'downloading' || status.state === 'ready') return { ok: true };
+  promptOpen = true;
+  try {
+    await askDownload(availableInfo);
+  } finally {
+    promptOpen = false;
+  }
+  return { ok: true };
+}
+
+// Install from the banner or Settings. Consent always goes through the same
+// "install now?" dialog; never install silently.
+async function promptInstall() {
+  if (!downloadedInfo) return { ok: false, error: 'No downloaded update is ready.' };
+  if (promptOpen) return { ok: false, error: 'A dialog is already open.' };
+  promptOpen = true;
+  try {
+    await askInstall(downloadedInfo);
+  } finally {
+    promptOpen = false;
+  }
+  return { ok: true };
+}
+
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(() => {
+    if (String(db.getSettings().autoCheckUpdates || '1') !== '1') return;
+    if (checkInFlight || promptOpen) return;
+    if (['downloading', 'ready', 'installing', 'checking'].includes(status.state)) return;
+    check(false).catch(() => {});
+  }, BACKGROUND_POLL_MS);
+  if (pollTimer.unref) pollTimer.unref();
 }
 
 function openReleases() {
@@ -259,11 +322,16 @@ function init(options = {}) {
       String(db.getSettings().autoCheckUpdates || '1') === '1') {
     setTimeout(() => { check(false).catch(() => {}); }, 5000);
   }
+
+  startPolling();
 }
 
 module.exports = {
   init,
   check,
+  maybeCheck,
+  download,
+  promptInstall,
   install,
   getStatus,
   openReleases

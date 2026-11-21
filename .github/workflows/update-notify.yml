@@ -1,0 +1,36 @@
+name: Update notification
+
+# When a GitHub release is published, write its version to the Firebase
+# Realtime Database pointer that running apps listen to. The app never trusts
+# this value on its own: it only uses it as a hint to check the GitHub feed.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Install firebase-admin outside the project so the app's Windows-only
+      # dependencies (better-sqlite3) are never built on the Linux runner.
+      - name: Install firebase-admin
+        run: npm install --prefix "$RUNNER_TEMP/firebase-admin" --no-audit --no-fund firebase-admin@13
+
+      - name: Publish the latest version pointer
+        env:
+          NODE_PATH: ${{ runner.temp }}/firebase-admin/node_modules
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+        run: node scripts/publish-update.js

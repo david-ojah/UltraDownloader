@@ -93,7 +93,8 @@ function init() {
     autoCheckUpdates: '1',
     updateSkipVersion: '',
     updateLastCheck: '',
-    extensionPromptShown: '0'
+    extensionPromptShown: '0',
+    updateBannerDismissed: ''
   };
   const ins = db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)');
   for (const [k, v] of Object.entries(defaults)) ins.run(k, v);

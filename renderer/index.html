@@ -49,6 +49,23 @@
       </div>
     </header>
 
+    <div id="updateBanner" class="update-banner" hidden role="status" aria-live="polite">
+      <div class="update-banner-icon" aria-hidden="true">⬆</div>
+      <div class="update-banner-body">
+        <div class="update-banner-title" id="updateBannerText">Update available</div>
+        <div class="update-banner-progress" id="updateBannerProgressWrap" hidden>
+          <div class="update-banner-track"><div class="update-banner-bar" id="updateBannerBar"></div></div>
+          <span class="update-banner-percent" id="updateBannerPercent">0%</span>
+        </div>
+      </div>
+      <div class="update-banner-actions">
+        <button id="updateBannerDownload" class="btn sm primary">Download update</button>
+        <button id="updateBannerInstall" class="btn sm primary" hidden>Install now</button>
+        <button id="updateBannerReleases" class="btn sm ghost">Releases</button>
+        <button id="updateBannerDismiss" class="update-banner-close" aria-label="Dismiss update banner">×</button>
+      </div>
+    </div>
+
     <div class="content">
       <!-- Downloads -->
       <section id="tab-downloads" class="panel active">

@@ -30,7 +30,9 @@ contextBridge.exposeInMainWorld('api', {
   updater: {
     check: () => ipcRenderer.invoke('app:updateCheck'),
     status: () => ipcRenderer.invoke('app:updateStatus'),
+    download: () => ipcRenderer.invoke('app:updateDownload'),
     install: () => ipcRenderer.invoke('app:updateInstall'),
+    promptInstall: () => ipcRenderer.invoke('app:updatePromptInstall'),
     openReleases: () => ipcRenderer.invoke('app:updateOpenReleases')
   },
   firefox: {

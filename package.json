@@ -60,6 +60,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^13.1.1",
-    "electron-updater": "^6.8.11"
+    "electron-updater": "^6.8.11",
+    "firebase": "^13.4.0"
   }
 }

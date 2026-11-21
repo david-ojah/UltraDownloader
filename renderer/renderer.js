@@ -5,6 +5,7 @@ let settings = {};
 let connections = [];
 let downloads = [];
 let queueState = { paused: false, active: 0, queued: 0, pausedJobs: 0, max: 3 };
+let updateState = null;
 const grabCandidates = [];
 const connSpeeds = {};
 
@@ -502,8 +503,39 @@ $('#setTempDirBtn').addEventListener('click', async () => {
   const folder = await window.api.downloads.chooseFolder();
   if (folder) $('#setTempDir').value = folder;
 });
+function renderUpdateBanner(s) {
+  const banner = $('#updateBanner');
+  if (!banner) return;
+  const version = s.version || '';
+  const dismissed = String(settings.updateBannerDismissed || '');
+  const visible = s.state === 'downloading' ||
+    ((s.state === 'available' || s.state === 'ready') && version && version !== dismissed);
+  if (!visible) { banner.hidden = true; return; }
+  banner.hidden = false;
+  const text = $('#updateBannerText');
+  if (s.state === 'downloading') {
+    text.textContent = `Downloading update${version ? ' ' + version : ''}…`;
+  } else if (s.state === 'ready') {
+    text.textContent = `Version ${version || 'update'} is ready to install.`;
+  } else {
+    text.textContent = `Ultra Downloader ${version || 'update'} is available to download.`;
+  }
+  $('#updateBannerDownload').hidden = s.state !== 'available';
+  $('#updateBannerInstall').hidden = s.state !== 'ready';
+  const wrap = $('#updateBannerProgressWrap');
+  if (s.state === 'downloading') {
+    const pct = Math.max(0, Math.min(100, Number(s.percent) || 0));
+    wrap.hidden = false;
+    $('#updateBannerBar').style.width = pct.toFixed(1) + '%';
+    $('#updateBannerPercent').textContent = Math.round(pct) + '%';
+  } else {
+    wrap.hidden = true;
+  }
+}
+
 function renderUpdateStatus(s) {
   if (!s) return;
+  updateState = s;
   $('#updateStatusText').textContent = s.message || 'No update check yet.';
   const progress = $('#updateProgress');
   if (s.state === 'downloading' && Number(s.percent) > 0) {
@@ -513,6 +545,7 @@ function renderUpdateStatus(s) {
     progress.style.display = 'none';
   }
   $('#installUpdateBtn').style.display = s.state === 'ready' ? 'inline-flex' : 'none';
+  renderUpdateBanner(s);
 }
 
 $('#setAutoUpdates').addEventListener('change', async () => {
@@ -536,12 +569,40 @@ $('#checkUpdatesBtn').addEventListener('click', async () => {
 });
 $('#installUpdateBtn').addEventListener('click', async () => {
   try {
-    await window.api.updater.install();
+    const r = await window.api.updater.promptInstall();
+    if (r && r.error) toast(r.error, 'info');
   } catch (e) {
     toast(String((e && e.message) || e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''));
   }
 });
 $('#openReleasesBtn').addEventListener('click', () => window.api.updater.openReleases());
+
+// Update banner (visible on every tab while an update is available/ready)
+$('#updateBannerDownload').addEventListener('click', async () => {
+  try {
+    const r = await window.api.updater.download();
+    if (r && r.error) toast(r.error, 'info');
+  } catch (e) {
+    toast(String((e && e.message) || e));
+  }
+});
+$('#updateBannerInstall').addEventListener('click', async () => {
+  try {
+    const r = await window.api.updater.promptInstall();
+    if (r && r.error) toast(r.error, 'info');
+  } catch (e) {
+    toast(String((e && e.message) || e));
+  }
+});
+$('#updateBannerReleases').addEventListener('click', () => window.api.updater.openReleases());
+$('#updateBannerDismiss').addEventListener('click', async () => {
+  const version = updateState && updateState.version;
+  if (version) {
+    settings.updateBannerDismissed = version;
+    try { await window.api.settings.set({ updateBannerDismissed: version }); } catch {}
+  }
+  $('#updateBanner').hidden = true;
+});
 $('#getFirefoxExtension').addEventListener('click', async () => {
   try {
     const r = await window.api.firefox.openExtension();

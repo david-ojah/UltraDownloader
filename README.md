@@ -25,6 +25,12 @@ starting over.
 - **Settings → Firefox extension → Get Firefox extension** opens the same page
   later.
 - If the app is not running, Firefox downloads normally.
+- **Update banner on every tab.** As soon as a new release is found, a banner
+  appears with **Download update**, **Install now** and **Dismiss** actions.
+  Dismissing hides it for that version only.
+- **Updates are found while the app is running.** A Firebase Realtime Database
+  signal (backed by a 30-minute check and a check when the window regains
+  focus) triggers the banner without needing a restart.
 
 ---
 
@@ -417,6 +423,19 @@ requests. Node.js 20 or newer is recommended for building.
 The installed app reads `latest.yml` from the latest public GitHub release. It
 asks before downloading and asks again before installing.
 
+### Release notifications
+
+Running apps listen to a Firebase Realtime Database pointer at `app/latest`.
+When a GitHub release is published, the **Update notification** workflow writes
+its version there, so open apps check immediately instead of waiting for the
+30-minute polling fallback. The GitHub feed still decides whether an update is
+really available, so the pointer cannot cause a false banner.
+
+The workflow needs the repository secret `FIREBASE_SERVICE_ACCOUNT` (a Firebase
+service account JSON key). The public Firebase web config lives in
+`src/firebase.js`; the database rules allow public reads of `app/latest` only
+and deny all client writes.
+
 ---
 
 ## Project layout
@@ -434,7 +453,10 @@ renderer/styles.css     Theme and layout
 extension/              Firefox download-link extension (enabled in 1.2.0)
 src/bridge.js           Loopback bridge for the extension
 src/firefox.js          First-run extension prompt and AMO page launcher
-src/updater.js          Startup/manual update checks and install prompts
+src/firebase.js         Public Firebase config and app/latest listener
+src/updater.js          Update checks, banner actions, polling and install prompts
+scripts/publish-update.js  Writes the release version to Firebase from CI
+.github/workflows/update-notify.yml  Release notification workflow
 assets/                 App icon
 ```
 
@@ -456,6 +478,11 @@ MIT. See [LICENSE](LICENSE).
 - Firefox downloads are queued in the running app; if the app is not running,
   Firefox handles them normally.
 - Direct links and extensionless file-host download buttons are supported.
+- Added an all-tabs update banner with Download, Install, Releases and Dismiss
+  actions.
+- Added a Firebase Realtime Database notification plus a 30-minute fallback
+  check and a check on window focus, so new releases are noticed without a
+  restart.
 
 ### 1.1.0
 - Added the self-updater with startup and manual checks.

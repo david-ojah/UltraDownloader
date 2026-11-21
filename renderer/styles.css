@@ -99,6 +99,57 @@ body {
 
 .content { flex: 1; overflow: auto; padding: 24px 28px 40px; }
 
+/* Update banner */
+.update-banner {
+  display: flex; align-items: center; gap: 14px;
+  margin: 14px 28px 0;
+  padding: 12px 14px 12px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background:
+    linear-gradient(90deg, rgba(53,224,208,0.16), rgba(109,255,168,0.05) 65%),
+    var(--surface);
+  box-shadow: 0 8px 26px rgba(0,0,0,0.28);
+  backdrop-filter: blur(12px);
+  animation: fadeIn .25s ease;
+}
+.update-banner[hidden] { display: none; }
+.update-banner-icon {
+  width: 34px; height: 34px; flex-shrink: 0;
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #042622; font-size: 17px; font-weight: 700;
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+.update-banner-body { flex: 1; min-width: 0; }
+.update-banner-title { font-size: 13.5px; font-weight: 600; color: var(--text); }
+.update-banner-progress { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.update-banner-progress[hidden] { display: none; }
+.update-banner-track {
+  flex: 1; height: 5px; border-radius: 999px; overflow: hidden;
+  background: rgba(53,224,208,0.14);
+}
+.update-banner-bar {
+  width: 0%; height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width .2s ease;
+}
+.update-banner-percent {
+  font-size: 11px; font-weight: 600; color: var(--accent);
+  min-width: 34px; text-align: right;
+}
+.update-banner-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.update-banner-actions .btn[hidden] { display: none; }
+.update-banner-close {
+  width: 28px; height: 28px; border-radius: 8px;
+  border: 1px solid transparent; background: transparent;
+  color: var(--text-muted); font-size: 19px; line-height: 1;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: all .18s ease;
+}
+.update-banner-close:hover { background: var(--surface-2); color: var(--text); border-color: var(--border); }
+
 /* Panels */
 .panel { display: none; }
 .panel.active { display: block; animation: fadeIn .25s ease; }

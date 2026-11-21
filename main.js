@@ -9,6 +9,7 @@ const downloader = require('./src/downloader');
 const bridge = require('./src/bridge');
 const updater = require('./src/updater');
 const firefox = require('./src/firefox');
+const firebase = require('./src/firebase');
 
 // The package version is kept semver-valid; displayVersion is an optional
 // user-facing label for revisions such as 1.0.1R1.
@@ -53,6 +54,9 @@ let tray = null;
 // lets the window go instead of hiding it forever.
 let quitting = false;
 let quitTimer = null;
+// Focus checks stay off until the first-run extension prompt and startup
+// update check have finished, so two dialogs cannot overlap.
+let startupSequenceDone = false;
 // Declared before the before-quit handler is registered: a second launch calls
 // app.quit() during module load, which fires that handler immediately.
 let powerBlockerId = null;
@@ -254,6 +258,32 @@ function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
+// Firebase Realtime Database: the release workflow writes app/latest when a
+// release is published, so a running app learns about it immediately instead
+// of waiting for the 30-minute polling fallback. Only the version string is
+// used; the GitHub feed still decides whether an update is really available.
+let realtimeUnsubscribe = null;
+function startUpdateNotifications() {
+  if (realtimeUnsubscribe) return;
+  let lastVersion = '';
+  let firstCallback = true;
+  realtimeUnsubscribe = firebase.subscribeLatest((latest) => {
+    const version = latest && String(latest.version || '').trim();
+    if (!version) { firstCallback = false; return; }
+    if (version === lastVersion) return;
+    const isInitial = firstCallback;
+    firstCallback = false;
+    lastVersion = version;
+    // The first callback is the current value; the startup check has just run,
+    // so ignore it and only react to later changes.
+    if (isInitial) return;
+    if (version === app.getVersion()) return;
+    if (String(db.getSettings().autoCheckUpdates || '1') !== '1') return;
+    console.log(`Firebase notify: new version ${version}`);
+    updater.check(false).catch(() => {});
+  });
+}
+
 app.whenReady().then(() => {
   // A second launch has already asked to quit; never initialise a duplicate.
   if (!singleInstanceLock) return;
@@ -307,6 +337,12 @@ app.whenReady().then(() => {
       try { downloader.shutdown(); } catch {}
     }
   });
+  if (mainWindow) {
+    mainWindow.on('focus', () => {
+      if (!startupSequenceDone) return;
+      try { updater.maybeCheck(); } catch {}
+    });
+  }
   // On the first 1.2.0 launch, offer the Firefox extension once the AMO
   // listing is public. Wait for that prompt before checking for app updates so
   // two modal dialogs cannot overlap.
@@ -315,6 +351,8 @@ app.whenReady().then(() => {
     if (String(db.getSettings().autoCheckUpdates || '1') === '1') {
       try { await updater.check(false); } catch {}
     }
+    startupSequenceDone = true;
+    startUpdateNotifications();
   }, 2500);
   // Seed the signature, then poll so hot-plugged adapters show up on their own.
   pollConnections().then(() => setInterval(pollConnections, 5000));
@@ -413,7 +451,9 @@ ipcMain.handle('downloads:queueState', async () => downloader.queueState());
 ipcMain.handle('app:info', async () => ({ version: APP_VERSION_LABEL, name: app.getName() }));
 ipcMain.handle('app:updateCheck', async () => updater.check(true));
 ipcMain.handle('app:updateStatus', async () => updater.getStatus());
+ipcMain.handle('app:updateDownload', async () => updater.download());
 ipcMain.handle('app:updateInstall', async () => updater.install());
+ipcMain.handle('app:updatePromptInstall', async () => updater.promptInstall());
 ipcMain.handle('app:updateOpenReleases', async () => updater.openReleases());
 ipcMain.handle('app:openExtension', async () => firefox.openExtensionPage());
 ipcMain.handle('downloads:cancel', async (e, id) => { const r = await downloader.cancel(id); logDeletion({ action: 'cancel', id, result: 'partial-data-removed' }); return r; });
