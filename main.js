@@ -10,6 +10,8 @@ const bridge = require('./src/bridge');
 const updater = require('./src/updater');
 const firefox = require('./src/firefox');
 const firebase = require('./src/firebase');
+const autostart = require('./src/autostart');
+const torrents = require('./src/torrents');
 
 // The package version is kept semver-valid; displayVersion is an optional
 // user-facing label for revisions such as 1.0.1R1.
@@ -34,6 +36,15 @@ function humanDuration(ms) {
   if (m < 60) return `${m}m ${s % 60}s`;
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
+}
+
+function torrentFileList(row) {
+  try {
+    const list = JSON.parse(row && row.files ? row.files : '[]');
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
 }
 
 function logDeletion(entry) {
@@ -66,6 +77,7 @@ app.on('before-quit', () => {
   // Stop live transfers without changing their saved status: a later launch
   // sees them as interrupted and resumes from the part files.
   try { downloader.shutdown(); } catch {}
+  try { torrents.shutdown(); } catch {}
   if (powerBlockerId !== null) {
     try { powerSaveBlocker.stop(powerBlockerId); } catch {}
     powerBlockerId = null;
@@ -79,11 +91,14 @@ app.on('before-quit', () => {
 // database).
 const singleInstanceLock = app.requestSingleInstanceLock();
 const quitRequested = process.argv.includes('--quit');
+// A login-item launch passes --hidden, so the window is built without being
+// shown and the app waits in the tray.
+const startHidden = process.argv.includes(autostart.HIDDEN_ARG);
 if (!singleInstanceLock) app.quit();
 
 function showWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) {
-    createWindow();
+    createWindow(true);
     return;
   }
   if (mainWindow.isMinimized()) mainWindow.restore();
@@ -98,11 +113,26 @@ function requestGracefulQuit() {
   if (quitting) return;
   quitting = true;
   try { downloader.shutdown(); } catch {}
+  try { torrents.shutdown(); } catch {}
   if (quitTimer) clearTimeout(quitTimer);
   quitTimer = setTimeout(() => {
     quitTimer = null;
     try { app.quit(); } catch {}
   }, 1200);
+}
+
+// A shell association or "Open with" launch passes a magnet URI or a .torrent
+// path on the command line.
+function findTorrentArg(argv) {
+  for (const arg of Array.isArray(argv) ? argv : []) {
+    if (typeof arg !== 'string') continue;
+    if (/^magnet:\?/i.test(arg)) return arg;
+    if (/\.torrent$/i.test(arg)) {
+      const file = path.resolve(arg);
+      if (fs.existsSync(file)) return file;
+    }
+  }
+  return null;
 }
 
 app.on('second-instance', (event, argv) => {
@@ -111,11 +141,18 @@ app.on('second-instance', (event, argv) => {
     return;
   }
   showWindow();
+  const torrentArg = findTorrentArg(argv);
+  if (torrentArg) {
+    torrents.add(torrentArg).catch((e) => {
+      console.error('torrent open:', e && e.message ? e.message : e);
+    });
+  }
 });
 
 // ---- Runtime status (notifications, taskbar, tray, power) -----------------
 const notifiedCompleted = new Set();
 const liveSpeeds = new Map();
+const liveTorrentSpeeds = new Map();
 
 function notifyComplete(row) {
   if (!Notification.isSupported()) return;
@@ -144,35 +181,44 @@ function notifyComplete(row) {
 function updateRuntimeStatus() {
   let rows = [];
   try { rows = db.listDownloads(); } catch { return; }
+  let torrentRows = [];
+  try { torrentRows = db.listTorrents(); } catch {}
   const active = rows.filter((r) => r.status === 'downloading' || r.status === 'assembling');
+  const activeTorrents = torrentRows.filter((r) => r.state === 'downloading' || r.state === 'checking');
+  const activeCount = active.length + activeTorrents.length;
   let fraction = -1;
-  if (active.length) {
-    const total = active.reduce((a, r) => a + (Number(r.totalSize) || 0), 0);
+  if (activeCount) {
+    const total = active.reduce((a, r) => a + (Number(r.totalSize) || 0), 0) +
+      activeTorrents.reduce((a, r) => a + (Number(r.totalSize) || 0), 0);
     const done = active.reduce((a, r) => a + (
-      r.status === 'assembling' ? (Number(r.totalSize) || 0) : (Number(r.downloaded) || 0)), 0);
+      r.status === 'assembling' ? (Number(r.totalSize) || 0) : (Number(r.downloaded) || 0)), 0) +
+      activeTorrents.reduce((a, r) => a + (Number(r.downloaded) || 0), 0);
     if (total > 0) fraction = Math.max(0, Math.min(1, done / total));
   }
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.setProgressBar(fraction); } catch {}
   }
   // A long download must not be cut off because Windows decided to sleep.
-  if (active.length && powerBlockerId === null) {
+  if (activeCount && powerBlockerId === null) {
     try { powerBlockerId = powerSaveBlocker.start('prevent-app-suspension'); } catch { powerBlockerId = null; }
-  } else if (!active.length && powerBlockerId !== null) {
+  } else if (!activeCount && powerBlockerId !== null) {
     try { powerSaveBlocker.stop(powerBlockerId); } catch {}
     powerBlockerId = null;
   }
   if (tray) {
-    if (!active.length) {
+    if (!activeCount) {
       tray.setToolTip('Ultra Downloader — idle');
     } else {
       let speed = 0;
       for (const [id, v] of liveSpeeds) {
         if (active.some((r) => r.id === id)) speed += v;
       }
+      for (const [id, v] of liveTorrentSpeeds) {
+        if (activeTorrents.some((r) => r.id === id)) speed += v;
+      }
       const pct = fraction >= 0 ? ` · ${Math.round(fraction * 100)}%` : '';
       const rate = speed > 0 ? ` · ${humanSize(speed)}/s` : '';
-      tray.setToolTip(`Ultra Downloader — ${active.length} active${pct}${rate}`);
+      tray.setToolTip(`Ultra Downloader — ${activeCount} active${pct}${rate}`);
     }
   }
 }
@@ -213,7 +259,32 @@ function handleDownloaderEvent(channel, payload) {
   }
 }
 
-function createWindow() {
+function handleTorrentEvent(channel, payload) {
+  if (channel === 'torrent:progress') {
+    if (payload && payload.id != null) {
+      liveTorrentSpeeds.set(payload.id, (Number(payload.downKbps) || 0) * 1000 / 8);
+    }
+    updateRuntimeStatus();
+    return;
+  }
+  if (channel === 'torrent:update') {
+    if (payload && payload.state !== 'downloading' && payload.state !== 'checking') {
+      liveTorrentSpeeds.delete(payload.id);
+    }
+    updateRuntimeStatus();
+    return;
+  }
+  if (channel === 'torrent:removed') {
+    if (payload) liveTorrentSpeeds.delete(payload.id);
+    updateRuntimeStatus();
+    return;
+  }
+  if (channel === 'torrent:queue' || channel === 'torrent:error' || channel === 'torrent:added') {
+    updateRuntimeStatus();
+  }
+}
+
+function createWindow(showImmediately = true) {
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 760,
@@ -221,6 +292,7 @@ function createWindow() {
     maximizable: false,
     minimizable: true,
     fullscreenable: false,
+    show: showImmediately,
     title: 'Ultra Downloader',
     backgroundColor: '#061120',
     webPreferences: {
@@ -297,16 +369,28 @@ app.whenReady().then(() => {
   // shortcuts from the app entirely.
   Menu.setApplicationMenu(null);
   db.init();
+  // Keep the Windows login item in step with the saved preference. Only touch
+  // the registry when they differ, so a normal launch rewrites nothing.
+  const startWithWindows = String(db.getSettings().startWithWindows || '0') === '1';
+  if (autostart.isSupported() && autostart.isEnabled() !== startWithWindows) {
+    try { autostart.setEnabled(startWithWindows); }
+    catch (e) { console.error('Start with Windows:', e && e.message ? e.message : e); }
+  }
   logDeletion({ action: 'startup', downloads: db.listDownloads().length, finished: db.listDownloads().filter(d => d.status === 'completed').length });
   downloader.init((channel, payload) => {
     sendToRenderer(channel, payload);
     try { handleDownloaderEvent(channel, payload); } catch {}
+  });
+  torrents.init((channel, payload) => {
+    sendToRenderer(channel, payload);
+    try { handleTorrentEvent(channel, payload); } catch {}
   });
   // Firefox extension bridge: loopback-only and origin-gated. 1.1.0 ships the
   // code but keeps it off until the signed extension is available (1.2.0).
   if (String(db.getSettings().browserBridgeEnabled || '0') === '1') {
     bridge.start({
       addJob: (url) => downloader.addJob(url),
+      addTorrent: (source) => torrents.add(source),
       version: APP_VERSION_LABEL
     }).then(({ port }) => {
       console.log(`Browser bridge listening on 127.0.0.1:${port}`);
@@ -318,10 +402,16 @@ app.whenReady().then(() => {
   }
   // Anything left mid-flight goes back through the queue, so the concurrency
   // limit is honoured after a restart too.
-  setTimeout(() => {
+  setTimeout(async () => {
     try { downloader.autostart(); updateRuntimeStatus(); } catch (e) { console.error('autostart', e); }
+    try { await torrents.autostart(); } catch (e) { console.error('torrent autostart', e); }
+    const startupTorrent = findTorrentArg(process.argv);
+    if (startupTorrent) {
+      try { await torrents.add(startupTorrent); }
+      catch (e) { console.error('torrent open:', e && e.message ? e.message : e); }
+    }
   }, 1000);
-  createWindow();
+  createWindow(!startHidden);
   createTray();
   updater.init({
     autoCheck: false,
@@ -335,6 +425,7 @@ app.whenReady().then(() => {
       quitting = true;
       try { bridge.stop(); } catch {}
       try { downloader.shutdown(); } catch {}
+      try { torrents.shutdown(); } catch {}
     }
   });
   if (mainWindow) {
@@ -344,8 +435,9 @@ app.whenReady().then(() => {
     });
   }
   // On the first 1.2.0 launch, offer the Firefox extension once the AMO
-  // listing is public. Wait for that prompt before checking for app updates so
-  // two modal dialogs cannot overlap.
+  // listing is public. The Start with Windows choice lives in the in-app
+  // onboarding overlay, so no native dialog opens here. Wait for the Firefox
+  // prompt before checking for app updates so modal dialogs cannot overlap.
   setTimeout(async () => {
     try { await firefox.promptIfNeeded(mainWindow, showWindow); } catch {}
     if (String(db.getSettings().autoCheckUpdates || '1') === '1') {
@@ -422,7 +514,7 @@ ipcMain.handle('settings:get', async () => db.getSettings());
 ipcMain.handle('settings:set', async (e, s) => {
   // Folders are created up front so a typo fails here with a readable message
   // instead of halfway through the first download.
-  for (const key of ['downloadDir', 'tempDir']) {
+  for (const key of ['downloadDir', 'tempDir', 'torrentSaveDir']) {
     if (!(key in s)) continue;
     const value = String(s[key] == null ? '' : s[key]).trim();
     if (!value) { s[key] = ''; continue; }
@@ -433,10 +525,15 @@ ipcMain.handle('settings:set', async (e, s) => {
     }
     s[key] = value;
   }
+  // Applying before persisting means a Windows failure leaves the stored value
+  // unchanged, so the checkbox can revert to the saved state.
+  if ('startWithWindows' in s) autostart.setEnabled(String(s.startWithWindows) === '1');
   const out = db.setSettings(s);
   downloader.invalidateLimits();
   // Raising the concurrency limit should put waiting downloads to work now.
   downloader.pumpQueue();
+  torrents.setSettings(out);
+  torrents.poll().catch(() => {});
   return out;
 });
 
@@ -448,7 +545,16 @@ ipcMain.handle('downloads:resume', async (e, id) => downloader.resume(id));
 ipcMain.handle('downloads:pauseAll', async () => downloader.pauseAll());
 ipcMain.handle('downloads:resumeAll', async () => downloader.resumeAll());
 ipcMain.handle('downloads:queueState', async () => downloader.queueState());
-ipcMain.handle('app:info', async () => ({ version: APP_VERSION_LABEL, name: app.getName() }));
+ipcMain.handle('app:info', async () => ({ version: APP_VERSION_LABEL, name: app.getName(), packaged: app.isPackaged, platform: process.platform }));
+ipcMain.handle('app:onboardingStatus', async () => {
+  const s = db.getSettings();
+  const supported = autostart.isSupported();
+  return {
+    needed: supported && String(s.autoStartPromptShown || '0') !== '1',
+    supported,
+    startWithWindows: String(s.startWithWindows || '0') === '1'
+  };
+});
 ipcMain.handle('app:updateCheck', async () => updater.check(true));
 ipcMain.handle('app:updateStatus', async () => updater.getStatus());
 ipcMain.handle('app:updateDownload', async () => updater.download());
@@ -498,6 +604,65 @@ ipcMain.handle('downloads:chooseFolder', async () => {
   return r.canceled ? null : r.filePaths[0];
 });
 
+ipcMain.handle('torrents:list', async () => db.listTorrents());
+ipcMain.handle('torrents:add', async (e, source, opts) => torrents.add(source, opts || {}));
+ipcMain.handle('torrents:pause', async (e, id) => torrents.pause(id));
+ipcMain.handle('torrents:pauseAll', async () => torrents.pauseAll());
+ipcMain.handle('torrents:resumeAll', async () => torrents.resumeAll());
+ipcMain.handle('torrents:resume', async (e, id) => torrents.resume(id));
+ipcMain.handle('torrents:setFilePriorities', async (e, id, priorities) => torrents.setFilePriorities(id, priorities));
+ipcMain.handle('torrents:setLimits', async (e, id, uploadKbps, downloadKbps) => torrents.setLimits(id, uploadKbps, downloadKbps));
+ipcMain.handle('torrents:peerList', async (e, id) => torrents.getPeerList(id));
+ipcMain.handle('torrents:updateTrackers', async (e, id) => torrents.updateTrackers(id));
+ipcMain.handle('torrents:queueState', async () => torrents.queueState());
+ipcMain.handle('torrents:chooseFolder', async () => {
+  const r = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'createDirectory']
+  });
+  return r.canceled ? null : r.filePaths[0];
+});
+ipcMain.handle('torrents:remove', async (e, id) => {
+  const row = db.getTorrent(id);
+  if (!row) return { removed: false };
+  const size = row.totalSize ? ` (${humanSize(row.totalSize)})` : '';
+  const choice = await dialog.showMessageBox(mainWindow, {
+    type: 'question',
+    buttons: ['Remove from list', 'Delete files too', 'Cancel'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+    title: 'Remove torrent',
+    message: 'Remove this torrent?',
+    detail: `${row.name || row.source || 'This torrent'}${size}\n\nRemove the entry only, or also delete the downloaded files?`
+  });
+  if (choice.response === 2) return { cancelled: true };
+  const deleteFiles = choice.response === 1;
+  const files = torrentFileList(row);
+  const result = await torrents.remove(id, { deleteFiles: false });
+  if (deleteFiles && row.saveDir) {
+    // Give libtorrent a moment to close its file handles before moving files.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const base = path.resolve(row.saveDir);
+    for (const file of files) {
+      if (!file || !file.name) continue;
+      const full = path.resolve(base, file.name);
+      if (full === base || !full.startsWith(base + path.sep)) continue;
+      if (!fs.existsSync(full)) continue;
+      try {
+        await shell.trashItem(full);
+        logDeletion({ action: 'torrent-trash', id, name: file.name, path: full, size: file.size, result: 'recycle-bin' });
+      } catch {
+        try {
+          fs.rmSync(full, { force: true });
+          logDeletion({ action: 'torrent-rmSync', id, name: file.name, path: full, size: file.size, result: 'permanent' });
+        } catch (err) {
+          logDeletion({ action: 'torrent-delete-failed', id, name: file.name, path: full, error: String(err && err.message) });
+        }
+      }
+    }
+  }
+  return { cancelled: false, deletedFiles: deleteFiles, removed: !!result.removed };
+});
 ipcMain.handle('shell:openPath', async (e, p) => shell.showItemInFolder(p));
 ipcMain.handle('shell:openFile', async (e, p) => shell.openPath(p));
 ipcMain.handle('app:quit', async () => requestGracefulQuit());

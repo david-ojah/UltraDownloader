@@ -80,11 +80,27 @@ function isHttpUrl(value) {
   }
 }
 
+function isTorrentSource(value) {
+  const v = String(value || '').trim();
+  if (/^magnet:\?/i.test(v)) return true;
+  try {
+    const u = new URL(v);
+    return (u.protocol === 'http:' || u.protocol === 'https:') &&
+      !!u.hostname && /\.torrent$/i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function start(options = {}) {
   if (server) return Promise.resolve({ port: listeningPort });
   const addJob = options.addJob;
+  const addTorrent = options.addTorrent;
   if (typeof addJob !== 'function') {
     return Promise.reject(new Error('bridge requires an addJob function'));
+  }
+  if (typeof addTorrent !== 'function') {
+    return Promise.reject(new Error('bridge requires an addTorrent function'));
   }
   const version = String(options.version || '');
   const firstPort = Math.max(1, parseInt(options.port, 10) || DEFAULT_PORT);
@@ -132,6 +148,25 @@ function start(options = {}) {
         version,
         api: 1
       }, origin);
+    }
+
+    if (req.method === 'POST' && pathname === '/torrent') {
+      let body;
+      try {
+        body = await readJson(req);
+      } catch (e) {
+        return sendJson(res, 400, { ok: false, error: e.message }, origin);
+      }
+      const url = String(body && body.url || '').trim();
+      if (!isTorrentSource(url)) {
+        return sendJson(res, 400, { ok: false, error: 'expected a magnet link or .torrent URL' }, origin);
+      }
+      try {
+        const row = await addTorrent(url);
+        return sendJson(res, 200, { ok: true, id: row && row.id }, origin);
+      } catch (e) {
+        return sendJson(res, 500, { ok: false, error: e.message || 'could not add torrent' }, origin);
+      }
     }
 
     if (req.method === 'POST' && pathname === '/add') {

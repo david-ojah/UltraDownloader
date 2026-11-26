@@ -24,8 +24,24 @@ contextBridge.exposeInMainWorld('api', {
     refreshLink: (id, url) => ipcRenderer.invoke('downloads:refreshLink', id, url),
     chooseFolder: () => ipcRenderer.invoke('downloads:chooseFolder')
   },
+  torrents: {
+    list: () => ipcRenderer.invoke('torrents:list'),
+    add: (source, opts) => ipcRenderer.invoke('torrents:add', source, opts),
+    pause: (id) => ipcRenderer.invoke('torrents:pause', id),
+    pauseAll: () => ipcRenderer.invoke('torrents:pauseAll'),
+    resumeAll: () => ipcRenderer.invoke('torrents:resumeAll'),
+    resume: (id) => ipcRenderer.invoke('torrents:resume', id),
+    remove: (id) => ipcRenderer.invoke('torrents:remove', id),
+    queueState: () => ipcRenderer.invoke('torrents:queueState'),
+    setFilePriorities: (id, priorities) => ipcRenderer.invoke('torrents:setFilePriorities', id, priorities),
+    setLimits: (id, uploadKbps, downloadKbps) => ipcRenderer.invoke('torrents:setLimits', id, uploadKbps, downloadKbps),
+    getPeerList: (id) => ipcRenderer.invoke('torrents:peerList', id),
+    updateTrackers: (id) => ipcRenderer.invoke('torrents:updateTrackers', id),
+    chooseFolder: () => ipcRenderer.invoke('torrents:chooseFolder')
+  },
   app: {
-    info: () => ipcRenderer.invoke('app:info')
+    info: () => ipcRenderer.invoke('app:info'),
+    onboardingStatus: () => ipcRenderer.invoke('app:onboardingStatus')
   },
   updater: {
     check: () => ipcRenderer.invoke('app:updateCheck'),

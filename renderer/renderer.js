@@ -5,9 +5,12 @@ let settings = {};
 let connections = [];
 let downloads = [];
 let queueState = { paused: false, active: 0, queued: 0, pausedJobs: 0, max: 3 };
+let torrents = [];
+let torrentQueue = { max: 2, active: 0, queued: 0, paused: 0, seeding: 0, held: false };
 let updateState = null;
 const grabCandidates = [];
 const connSpeeds = {};
+let onboarding = { slide: 1, choice: null, supported: false, needed: false };
 
 function fmtBytes(b) {
   if (!b) return '0 B';
@@ -44,6 +47,36 @@ function inputToKbps(val) {
   const v = parseFloat(val) || 0;
   return speedUnit() === 'mbs' ? Math.round(v * 8000) : Math.round(v * 1000);
 }
+// Torrent limits use their own unit (decimal KB/s or MB/s); storage stays kbps.
+function torrentLimitUnit() {
+  return settings.torrentLimitUnit === 'mb' ? 'mb' : 'kb';
+}
+function trimLimitNumber(n) {
+  if (!Number.isFinite(n)) return '0';
+  return String(Number(n.toFixed(6)));
+}
+function torrentKbpsToInput(kbps, unit) {
+  const v = Number(kbps) || 0;
+  return trimLimitNumber(unit === 'mb' ? v / 8000 : v / 8);
+}
+function torrentInputToKbps(value, unit) {
+  const v = Math.max(0, parseFloat(value) || 0);
+  return unit === 'mb' ? Math.round(v * 8000) : Math.round(v * 8);
+}
+function formatTorrentLimit(kbps, unit) {
+  const v = Math.max(0, Number(kbps) || 0);
+  if (!v) return 'unlimited';
+  return `${torrentKbpsToInput(v, unit)} ${unit === 'mb' ? 'MB/s' : 'KB/s'}`;
+}
+function setTorrentLimitLabels(unit) {
+  const label = unit === 'mb' ? 'MB/s' : 'KB/s';
+  ['#torrentUploadUnitLabel', '#torrentDownloadUnitLabel',
+    '#limitModalUploadUnitLabel', '#limitModalDownloadUnitLabel'].forEach((sel) => {
+    const el = $(sel);
+    if (el) el.textContent = label;
+  });
+}
+let torrentLimitFormUnit = 'kb'; // unit currently shown in the torrent settings fields
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 function toast(msg, type = 'success') {
@@ -55,8 +88,80 @@ function toast(msg, type = 'success') {
   setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; setTimeout(() => t.remove(), 300); }, 2800);
 }
 
+// First-run onboarding: feature tour plus the Start with Windows choice.
+async function initOnboarding() {
+  let status;
+  try { status = await window.api.app.onboardingStatus(); } catch { return; }
+  if (!status || !status.needed) return;
+  onboarding.needed = true;
+  onboarding.supported = !!status.supported;
+  if (status.startWithWindows) setOnboardingChoice('yes');
+  const overlay = $('#onboarding');
+  if (!overlay) return;
+  overlay.hidden = false;
+  showOnboardingSlide(1);
+}
+
+function showOnboardingSlide(n) {
+  onboarding.slide = n === 2 ? 2 : 1;
+  $$('.onboarding-slide').forEach((el) => {
+    el.hidden = Number(el.dataset.slide) !== onboarding.slide;
+  });
+  $$('.onboarding-dot').forEach((el) => {
+    el.classList.toggle('active', Number(el.dataset.dot) === onboarding.slide);
+  });
+  const next = $('#onboardingNext');
+  if (next) next.disabled = !onboarding.supported;
+  const back = $('#onboardingBack');
+  if (back) back.disabled = onboarding.slide !== 2;
+  const cont = $('#onboardingContinue');
+  if (cont) cont.disabled = !onboarding.choice;
+}
+
+function setOnboardingChoice(value) {
+  onboarding.choice = value === 'yes' ? 'yes' : 'no';
+  for (const [id, choice] of [['#onboardingYes', 'yes'], ['#onboardingNo', 'no']]) {
+    const el = $(id);
+    if (!el) continue;
+    const selected = onboarding.choice === choice;
+    el.classList.toggle('selected', selected);
+    el.setAttribute('aria-pressed', selected ? 'true' : 'false');
+  }
+  const cont = $('#onboardingContinue');
+  if (cont) cont.disabled = false;
+}
+
+async function completeOnboarding() {
+  if (!onboarding.choice) return;
+  const btn = $('#onboardingContinue');
+  if (btn) btn.disabled = true;
+  try {
+    await window.api.settings.set({
+      startWithWindows: onboarding.choice === 'yes' ? '1' : '0',
+      autoStartPromptShown: '1'
+    });
+    $('#onboarding').hidden = true;
+    await loadSettings();
+    if (onboarding.choice === 'no') {
+      toast('You can enable Start with Windows later in Settings → Start Ultra Downloader when Windows starts', 'info');
+    }
+  } catch (e) {
+    const overlay = $('#onboarding');
+    if (overlay) overlay.hidden = false;
+    if (btn) btn.disabled = false;
+    toast(String((e && e.message) || e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''), 'error');
+  }
+}
+
+$('#onboardingNext').addEventListener('click', () => showOnboardingSlide(2));
+$('#onboardingBack').addEventListener('click', () => showOnboardingSlide(1));
+$('#onboardingYes').addEventListener('click', () => setOnboardingChoice('yes'));
+$('#onboardingNo').addEventListener('click', () => setOnboardingChoice('no'));
+$('#onboardingContinue').addEventListener('click', () => { completeOnboarding(); });
+
 const pageMeta = {
   downloads: ['Downloads', 'Manage your download queue'],
+  torrents: ['Torrents', 'Download and seed BitTorrent content'],
   finished: ['Finished', 'Downloads that completed successfully'],
   connections: ['Connections', 'Manage network adapters'],
   settings: ['Settings', 'Configure Ultra Downloader']
@@ -372,6 +477,615 @@ $('#quickAdd').addEventListener('click', async () => {
 });
 $('#quickUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#quickAdd').click(); });
 
+// ---- Torrents --------------------------------------------------------------
+function torrentFiles(t) {
+  try {
+    const list = JSON.parse(t && t.files ? t.files : '[]');
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function torrentPct(t) {
+  return Math.max(0, Math.min(100, (Number(t.progress) || 0) * 100));
+}
+
+function torrentSpeed(kbps) {
+  return toSpeedValue((Number(kbps) || 0) * 1000 / 8);
+}
+
+function torrentDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return `${total}s`;
+  const m = Math.floor(total / 60), sec = total % 60;
+  if (m < 60) return sec ? `${m}m ${sec}s` : `${m}m`;
+  const h = Math.floor(m / 60), min = m % 60;
+  if (h < 24) return min ? `${h}h ${min}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d ${h % 24}h`;
+}
+
+function torrentEta(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return '—';
+  if (value === 0) return 'done';
+  return torrentDuration(value);
+}
+
+function torrentRatio(t) {
+  const done = Number(t.downloaded) || 0;
+  return done > 0 ? (Number(t.uploaded) || 0) / done : 0;
+}
+
+function torrentStatusClass(state) {
+  if (state === 'seeding') return 'status-completed';
+  if (state === 'checking') return 'status-downloading';
+  if (state === 'error') return 'status-failed';
+  return 'status-' + state;
+}
+
+function torrentMetaText(t) {
+  const pct = torrentPct(t).toFixed(1) + '%';
+  const size = `${fmtBytes(t.downloaded || 0)} / ${fmtBytes(t.totalSize || 0)}`;
+  if (t.state === 'queued') return `${size} · waiting for a free slot`;
+  if (t.state === 'checking') return `${size} · checking pieces · ${pct}`;
+  if (t.state === 'seeding') {
+    return `${fmtBytes(t.totalSize || t.downloaded || 0)} · seeding · ratio ${torrentRatio(t).toFixed(2)}`;
+  }
+  if (t.state === 'completed') return `${fmtBytes(t.totalSize || t.downloaded || 0)} · complete`;
+  if (t.state === 'paused') return `${size} · ${pct} · paused`;
+  if (t.state === 'error') return `${size} · ${pct} · stopped`;
+  const upPayload = Math.max(0, Number(t.uploadPayloadKbps) || 0);
+  return `${size} · ${pct} · ↓ ${torrentSpeed(t.downKbps)} · ↑ ${torrentSpeed(upPayload)}`;
+}
+
+function torrentCount(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? String(Math.trunc(n)) : '—';
+}
+
+function torrentLimitText(t) {
+  const unit = torrentLimitUnit();
+  const upEffective = Number(t.effectiveUploadLimitKbps);
+  const downEffective = Number(t.effectiveDownloadLimitKbps);
+  const up = upEffective > 0
+    ? upEffective
+    : (Number(t.uploadLimitKbps) > 0
+      ? Number(t.uploadLimitKbps)
+      : (Number(settings.torrentUploadLimitKbps) || 0));
+  const down = downEffective > 0
+    ? downEffective
+    : (Number(t.downloadLimitKbps) > 0
+      ? Number(t.downloadLimitKbps)
+      : (Number(settings.torrentDownloadLimitKbps) || 0));
+  const upText = up > 0 ? `↑ ${formatTorrentLimit(up, unit)}` : '↑ unlimited';
+  const downText = down > 0 ? `↓ ${formatTorrentLimit(down, unit)}` : '↓ unlimited';
+  return `${downText} · ${upText}`;
+}
+
+function torrentDetail(label, value, field, title) {
+  const fieldAttr = field ? ` data-tf="${field}"` : '';
+  const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
+  return `<div class="torrent-detail"${titleAttr}><span>${label}</span><b${fieldAttr}>${value}</b></div>`;
+}
+
+function torrentStatsHtml(t) {
+  const chips = [];
+  if (t.state !== 'completed') {
+    const upPayload = Math.max(0, Number(t.uploadPayloadKbps) || 0);
+    const upTotal = Math.max(0, Number(t.upKbps) || 0);
+    const upTotalText = upTotal > upPayload + 0.001 ? ` (${torrentSpeed(upTotal)})` : '';
+    chips.push(`<span class="conn-chip"><i style="background:var(--accent)"></i>↓ ${torrentSpeed(t.downKbps)}</span>`);
+    chips.push(`<span class="conn-chip" title="Payload upload${upTotalText ? '; total in parentheses' : ''}"><i style="background:var(--success)"></i>↑ ${torrentSpeed(upPayload)}${upTotalText}</span>`);
+  }
+  chips.push(`<span class="conn-chip">${Number(t.peers) || 0} peers</span>`);
+  chips.push(`<span class="conn-chip">${Number(t.seeds) || 0} seeds</span>`);
+  const target = Number(settings.torrentRatioLimit) || Number(t.ratioLimit) || 0;
+  const ratioText = target > 0
+    ? `ratio ${torrentRatio(t).toFixed(2)} / ${target.toFixed(2)}`
+    : `ratio ${torrentRatio(t).toFixed(2)}`;
+  if (Number(t.uploaded) > 0 || target > 0) chips.push(`<span class="conn-chip">${ratioText}</span>`);
+  if (t.state === 'downloading' && Number(t.etaSeconds) >= 0) {
+    chips.push(`<span class="conn-chip">ETA ${torrentEta(t.etaSeconds)}</span>`);
+  }
+
+  const wantedDone = Number(t.totalWantedDone) || Number(t.downloaded) || 0;
+  const wantedTotal = Number(t.totalSize) || Number(t.totalWanted) || 0;
+  const allUp = Math.max(Number(t.allTimeUpload) || 0, Number(t.uploaded) || 0);
+  const allDown = Math.max(Number(t.allTimeDownload) || 0, Number(t.downloaded) || 0);
+  const pieces = `${torrentCount(t.pieces)} / ${torrentCount(t.piecesTotal)}`;
+  const tracker = t.currentTracker || '';
+  const complete = torrentCount(t.numComplete);
+  const incomplete = torrentCount(t.numIncomplete);
+  const known = torrentCount(t.listPeers);
+  const copies = Number(t.distributedCopies) > 0 ? Number(t.distributedCopies).toFixed(2) : '—';
+  const nextAnnounce = Number(t.nextAnnounceSec) > 0 ? torrentDuration(t.nextAnnounceSec) : '—';
+
+  const details = [
+    torrentDetail('ETA', (t.state === 'seeding' || t.state === 'completed') ? '—' : torrentEta(t.etaSeconds), 'eta'),
+    torrentDetail('Ratio', ratioText.replace(/^ratio /, ''), 'ratio'),
+    torrentDetail('Wanted', `${fmtBytes(wantedDone)} / ${fmtBytes(wantedTotal)}`, 'wanted'),
+    torrentDetail('All-time up', fmtBytes(allUp), 'allup'),
+    torrentDetail('All-time down', fmtBytes(allDown), 'alldown'),
+    torrentDetail('Pieces', pieces, 'pieces'),
+    torrentDetail('Tracker', escapeHtml(tracker || '—'), 'tracker', tracker),
+    torrentDetail('Swarm', `${complete} seeds · ${incomplete} peers · ${known} known`, 'swarm'),
+    torrentDetail('Connections', `${torrentCount(t.numConnections)} (${torrentCount(t.numUploads)} up)`, 'conns'),
+    torrentDetail('Copies', copies, 'copies'),
+    torrentDetail('Active', torrentDuration(t.activeSeconds), 'active'),
+    torrentDetail('Seeding', torrentDuration(t.seedingSeconds), 'seeding'),
+    torrentDetail('Limits', escapeHtml(torrentLimitText(t)), 'limits', torrentLimitText(t)),
+    torrentDetail('Next announce', nextAnnounce, 'announce')
+  ];
+  return `<div class="conn-speeds">${chips.join('')}</div>` +
+    `<div class="torrent-detail-grid">${details.join('')}</div>`;
+}
+
+function torrentActions(t) {
+  const files = torrentFiles(t);
+  const canPause = t.state === 'downloading' || t.state === 'checking' || t.state === 'seeding';
+  const canResume = t.state === 'paused' || t.state === 'error' || t.state === 'completed';
+  return `
+    ${canPause ? '<button class="btn sm ghost" data-ta="pause">Pause</button>' : ''}
+    ${canResume ? '<button class="btn sm primary" data-ta="resume">Resume</button>' : ''}
+    <button class="btn sm ghost" data-ta="limits">Limits</button>
+    <button class="btn sm ghost" data-ta="peers">Peers</button>
+    <button class="btn sm ghost" data-ta="trackers">Update trackers</button>
+    ${files.length ? '<button class="btn sm ghost" data-ta="files">Files</button>' : ''}
+    ${t.saveDir ? '<button class="btn sm ghost" data-ta="folder">Folder</button>' : ''}
+    <button class="btn sm danger" data-ta="remove">Remove</button>`;
+}
+
+function buildTorrentCard(t) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.dataset.torrentId = t.id;
+  const pct = torrentPct(t);
+  card.innerHTML = `
+    <div class="card-head">
+      <div class="card-title" title="${escapeHtml(t.source || '')}">${escapeHtml(t.name || t.source || 'Torrent')}</div>
+      <span class="status-pill ${torrentStatusClass(t.state)}">${t.state}</span>
+    </div>
+    <div class="card-meta" data-tmeta>${escapeHtml(torrentMetaText(t))}</div>
+    <div class="progress"><div data-tbar style="width:${pct.toFixed(1)}%"></div></div>
+    <div class="torrent-stats" data-tstats>${torrentStatsHtml(t)}</div>
+    ${t.error && t.state === 'error' ? `<div class="card-error">${escapeHtml(t.error)}</div>` : ''}
+    <div class="card-row">
+      <div class="card-meta" title="${escapeHtml(t.source || '')}">${escapeHtml(t.source || '')}</div>
+      <div class="card-actions">${torrentActions(t)}</div>
+    </div>
+  `;
+  card.querySelectorAll('[data-ta]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const action = btn.dataset.ta;
+      try {
+        if (action === 'pause') await window.api.torrents.pause(t.id);
+        if (action === 'resume') await window.api.torrents.resume(t.id);
+        if (action === 'remove') {
+          const result = await window.api.torrents.remove(t.id);
+          if (result && result.cancelled) return;
+        }
+        if (action === 'folder') { if (t.saveDir) window.api.shell.openPath(t.saveDir); return; }
+        if (action === 'files') { openFileModal(t); return; }
+        if (action === 'limits') { openLimitModal(t); return; }
+        if (action === 'peers') { openPeerModal(t); return; }
+        if (action === 'trackers') {
+          try {
+            await window.api.torrents.updateTrackers(t.id);
+            toast('Trackers updated');
+          } catch (e) {
+            toast(String((e && e.message) || e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''), 'error');
+          }
+          await refreshTorrents();
+          return;
+        }
+        await refreshTorrents();
+      } catch (e) {
+        toast(String((e && e.message) || e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''), 'error');
+      }
+    });
+  });
+  return card;
+}
+
+function updateTorrentStats() {
+  const el = $('#torrentQueueStatus');
+  if (!el) return;
+  const max = Number(torrentQueue.max) || Number(settings.torrentMaxActive) || 2;
+  if (torrentQueue.held) {
+    el.textContent = `Torrent queue paused · ${torrentQueue.paused} stopped · Resume all to continue`;
+    return;
+  }
+  const bits = [];
+  if (torrentQueue.active > 0) bits.push(`${torrentQueue.active} active · up to ${max} at once`);
+  if (torrentQueue.queued > 0) bits.push(`${torrentQueue.queued} waiting`);
+  if (torrentQueue.seeding > 0) bits.push(`${torrentQueue.seeding} seeding`);
+  if (torrentQueue.paused > 0) bits.push(`${torrentQueue.paused} paused`);
+  el.textContent = bits.length ? bits.join(' · ') : 'Torrents start automatically.';
+}
+
+function renderTorrents() {
+  const el = $('#torrentList');
+  if (!el) return;
+  el.innerHTML = '';
+  if (torrents.length === 0) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">🧲</div><div>No torrents yet. Paste a magnet link or a .torrent URL above, or open a .torrent file.</div></div>';
+  } else {
+    for (const t of torrents) el.appendChild(buildTorrentCard(t));
+  }
+  updateTorrentStats();
+}
+
+async function refreshTorrents() {
+  try {
+    torrents = await window.api.torrents.list();
+  } catch (e) {
+    console.error('torrent list:', e);
+    return;
+  }
+  renderTorrents();
+  try {
+    const state = await window.api.torrents.queueState();
+    if (state) torrentQueue = { ...torrentQueue, ...state };
+  } catch {}
+  updateTorrentStats();
+}
+
+function updateTorrentCardLive(p) {
+  const t = torrents.find((x) => x.id === p.id);
+  if (!t) { refreshTorrents(); return; }
+  Object.assign(t, {
+    progress: p.progress,
+    downloaded: p.downloaded,
+    totalSize: p.totalSize,
+    uploaded: p.uploaded,
+    downKbps: p.downKbps,
+    upKbps: p.upKbps,
+    uploadPayloadKbps: p.uploadPayloadKbps,
+    downloadPayloadKbps: p.downloadPayloadKbps,
+    peers: p.peers,
+    seeds: p.seeds,
+    pieces: p.pieces,
+    piecesTotal: p.piecesTotal,
+    etaSeconds: p.etaSeconds,
+    totalDone: p.totalDone,
+    totalWantedDone: p.totalWantedDone,
+    allTimeUpload: p.allTimeUpload,
+    allTimeDownload: p.allTimeDownload,
+    currentTracker: p.currentTracker,
+    nextAnnounceSec: p.nextAnnounceSec,
+    numComplete: p.numComplete,
+    numIncomplete: p.numIncomplete,
+    listPeers: p.listPeers,
+    distributedCopies: p.distributedCopies,
+    numConnections: p.numConnections,
+    numUploads: p.numUploads,
+    activeSeconds: p.activeSeconds,
+    seedingSeconds: p.seedingSeconds,
+    effectiveUploadLimitKbps: p.uploadLimitKbps,
+    effectiveDownloadLimitKbps: p.downloadLimitKbps,
+  });
+  const card = document.querySelector(`#torrentList .card[data-torrent-id="${p.id}"]`);
+  if (!card) { renderTorrents(); return; }
+  const meta = card.querySelector('[data-tmeta]');
+  if (meta) meta.textContent = torrentMetaText(t);
+  const bar = card.querySelector('[data-tbar]');
+  if (bar) bar.style.width = torrentPct(t).toFixed(1) + '%';
+  const stats = card.querySelector('[data-tstats]');
+  if (stats) stats.innerHTML = torrentStatsHtml(t);
+  const pill = card.querySelector('.status-pill');
+  if (pill) {
+    pill.textContent = t.state;
+    pill.className = `status-pill ${torrentStatusClass(t.state)}`;
+  }
+}
+
+$('#addTorrent').addEventListener('click', async () => {
+  const source = $('#quickMagnet').value.trim();
+  if (!source) return;
+  const btn = $('#addTorrent');
+  btn.disabled = true;
+  try {
+    await window.api.torrents.add(source);
+    $('#quickMagnet').value = '';
+    await refreshTorrents();
+    toast('Torrent added');
+  } catch (e) {
+    toast(String((e && e.message) || e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''), 'error');
+  } finally {
+    btn.disabled = false;
+  }
+});
+$('#quickMagnet').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#addTorrent').click(); });
+
+$('#pauseAllTorrents').addEventListener('click', async () => {
+  const active = torrents.filter((t) => ['downloading', 'checking', 'seeding'].includes(t.state));
+  if (!active.length && !torrents.some((t) => t.state === 'queued')) {
+    toast('No active or waiting torrents', 'info');
+    return;
+  }
+  const r = await window.api.torrents.pauseAll();
+  await refreshTorrents();
+  toast(`Torrent queue paused${r && r.paused ? ` · ${r.paused} stopped` : ''}`);
+});
+$('#resumeAllTorrents').addEventListener('click', async () => {
+  const r = await window.api.torrents.resumeAll();
+  await refreshTorrents();
+  const n = (r && r.resumed) || 0;
+  toast(n ? `Resumed ${n} torrent${n === 1 ? '' : 's'}` : 'Torrent queue resumed');
+});
+
+// ---- Torrent file selection ----
+let fileModalId = null;
+let fileModalFiles = [];
+
+function openFileModal(t) {
+  const files = torrentFiles(t);
+  if (!files.length) {
+    toast('The file list appears after the torrent metadata arrives', 'info');
+    return;
+  }
+  fileModalId = t.id;
+  fileModalFiles = files;
+  const list = $('#fileModalList');
+  list.innerHTML = '';
+  for (const file of files) {
+    const row = document.createElement('label');
+    row.className = 'torrent-file-row';
+    row.innerHTML = `
+      <input type="checkbox" data-file-index="${file.index}" ${Number(file.priority) !== 0 ? 'checked' : ''} />
+      <span class="torrent-file-name">${escapeHtml(file.name)}</span>
+      <span class="torrent-file-size">${fmtBytes(file.size)}</span>
+    `;
+    list.appendChild(row);
+  }
+  $('#fileModalError').textContent = '';
+  $('#fileModal').classList.add('open');
+}
+
+function closeFileModal() {
+  $('#fileModal').classList.remove('open');
+  fileModalId = null;
+  fileModalFiles = [];
+  $('#fileModalError').textContent = '';
+}
+
+$('#fileModalClose').addEventListener('click', closeFileModal);
+$('#fileModalCancel').addEventListener('click', closeFileModal);
+$('#fileModal').addEventListener('click', (e) => { if (e.target.id === 'fileModal') closeFileModal(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('#fileModal').classList.contains('open')) closeFileModal();
+});
+
+$('#fileModalSave').addEventListener('click', async () => {
+  const id = fileModalId;
+  if (id == null) return;
+  const boxes = $$('#fileModalList input[type=checkbox]');
+  const priorities = [];
+  boxes.forEach((box, i) => {
+    priorities[fileModalFiles[i].index] = box.checked ? 4 : 0;
+  });
+  if (!priorities.some((p) => p > 0)) {
+    $('#fileModalError').textContent = 'Select at least one file.';
+    return;
+  }
+  const btn = $('#fileModalSave');
+  btn.disabled = true;
+  btn.textContent = 'Applying…';
+  $('#fileModalError').textContent = '';
+  try {
+    await window.api.torrents.setFilePriorities(id, priorities);
+    closeFileModal();
+    await refreshTorrents();
+    toast('File selection saved');
+  } catch (e) {
+    $('#fileModalError').textContent = String((e && e.message) || e)
+      .replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Apply';
+  }
+});
+
+// ---- Torrent speed limits and peers ----
+let limitModalId = null;
+let limitModalUnit = 'kb';
+let limitModalTorrent = null;
+// Only fields the user actually changed are sent on save. An untouched field
+// goes as null so its stored per-torrent override is kept.
+let limitModalTouched = { upload: false, download: false };
+let peerModalId = null;
+
+function limitModalEffectiveText(t) {
+  const unit = limitModalUnit;
+  const globalUp = Number(settings.torrentUploadLimitKbps) || 0;
+  const globalDown = Number(settings.torrentDownloadLimitKbps) || 0;
+  const upOverride = Number(t.uploadLimitKbps) || 0;
+  const downOverride = Number(t.downloadLimitKbps) || 0;
+  const liveUp = Number(t.effectiveUploadLimitKbps);
+  const liveDown = Number(t.effectiveDownloadLimitKbps);
+  const describe = (override, global, live) => {
+    const value = live > 0 ? live : (override > 0 ? override : global);
+    if (!(value > 0)) return 'unlimited';
+    const source = override > 0
+      ? 'per-torrent override'
+      : (global > 0 ? 'inherited from global' : 'applied by the engine');
+    return `${formatTorrentLimit(value, unit)} (${source})`;
+  };
+  return `Currently effective: ↓ ${describe(downOverride, globalDown, liveDown)} · ↑ ${describe(upOverride, globalUp, liveUp)}`;
+}
+
+function openLimitModal(t) {
+  limitModalId = t.id;
+  limitModalTorrent = t;
+  limitModalUnit = torrentLimitUnit();
+  limitModalTouched = { upload: false, download: false };
+  $('#limitModalName').textContent = t.name || t.source || 'this torrent';
+  $('#limitModalUnit').value = limitModalUnit;
+  $('#limitModalUpload').value = torrentKbpsToInput(Number(t.uploadLimitKbps) || 0, limitModalUnit);
+  $('#limitModalDownload').value = torrentKbpsToInput(Number(t.downloadLimitKbps) || 0, limitModalUnit);
+  setTorrentLimitLabels(limitModalUnit);
+  $('#limitModalEffective').textContent = limitModalEffectiveText(t);
+  $('#limitModalError').textContent = '';
+  $('#limitModal').classList.add('open');
+}
+
+function closeLimitModal() {
+  $('#limitModal').classList.remove('open');
+  limitModalId = null;
+  limitModalTorrent = null;
+  limitModalTouched = { upload: false, download: false };
+  $('#limitModalError').textContent = '';
+}
+
+$('#limitModalClose').addEventListener('click', closeLimitModal);
+$('#limitModalCancel').addEventListener('click', closeLimitModal);
+$('#limitModal').addEventListener('click', (e) => { if (e.target.id === 'limitModal') closeLimitModal(); });
+$('#limitModalUpload').addEventListener('input', () => { limitModalTouched.upload = true; });
+$('#limitModalDownload').addEventListener('input', () => { limitModalTouched.download = true; });
+$('#limitModalInherit').addEventListener('click', () => {
+  // 0 on a torrent means "use the global limit", not "unlimited".
+  $('#limitModalUpload').value = 0;
+  $('#limitModalDownload').value = 0;
+  limitModalTouched = { upload: true, download: true };
+});
+// Switching the unit converts the entered speeds, so the limit keeps its value.
+$('#limitModalUnit').addEventListener('change', () => {
+  const unit = $('#limitModalUnit').value === 'mb' ? 'mb' : 'kb';
+  if (unit === limitModalUnit) return;
+  for (const sel of ['#limitModalUpload', '#limitModalDownload']) {
+    const kbps = torrentInputToKbps($(sel).value, limitModalUnit);
+    $(sel).value = torrentKbpsToInput(kbps, unit);
+  }
+  limitModalUnit = unit;
+  setTorrentLimitLabels(unit);
+  if (limitModalTorrent) {
+    $('#limitModalEffective').textContent = limitModalEffectiveText(limitModalTorrent);
+  }
+});
+
+$('#limitModalSave').addEventListener('click', async () => {
+  const id = limitModalId;
+  if (id == null) return;
+  const btn = $('#limitModalSave');
+  const unit = $('#limitModalUnit').value === 'mb' ? 'mb' : 'kb';
+  // null keeps the stored override for a field the user did not edit. 0 is an
+  // explicit "inherit the global limit" only when that field was edited.
+  const uploadKbps = limitModalTouched.upload
+    ? torrentInputToKbps($('#limitModalUpload').value, unit) : null;
+  const downloadKbps = limitModalTouched.download
+    ? torrentInputToKbps($('#limitModalDownload').value, unit) : null;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  $('#limitModalError').textContent = '';
+  try {
+    await window.api.torrents.setLimits(id, uploadKbps, downloadKbps);
+    closeLimitModal();
+    await refreshTorrents();
+    toast('Speed limits saved');
+  } catch (e) {
+    $('#limitModalError').textContent = String((e && e.message) || e)
+      .replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save limits';
+  }
+});
+
+const PEER_FLAG_BITS = [
+  [1 << 0, 'interested'], [1 << 1, 'choked'], [1 << 2, 'peer interested'],
+  [1 << 3, 'peer choked'], [1 << 4, 'ext'], [1 << 5, 'outgoing'],
+  [1 << 7, 'connecting'], [1 << 10, 'seed'], [1 << 12, 'snubbed'],
+  [1 << 13, 'upload only'], [1 << 16, 'i2p'], [1 << 17, 'uTP'],
+  [1 << 18, 'TLS'], [1 << 19, 'RC4'], [1 << 20, 'encrypted']
+];
+const PEER_SOURCE_BITS = [
+  [1 << 0, 'tracker'], [1 << 1, 'DHT'], [1 << 2, 'PEX'],
+  [1 << 3, 'LSD'], [1 << 4, 'resume'], [1 << 5, 'incoming']
+];
+
+function peerBitsText(value, bits) {
+  const flags = Number(value) || 0;
+  const out = bits.filter(([bit]) => (flags & bit) !== 0).map(([, label]) => label);
+  return out.join(' · ');
+}
+
+function peerFlagsText(value) {
+  return peerBitsText(value, PEER_FLAG_BITS);
+}
+
+function peerSourceText(value) {
+  return peerBitsText(value, PEER_SOURCE_BITS);
+}
+
+function peerConnectionText(value) {
+  const type = Number(value) || 0;
+  if (type & 4) return 'HTTP seed';
+  if (type & 2) return 'web seed';
+  return 'BitTorrent';
+}
+
+function peerRowHtml(p) {
+  const host = String(p.ip || '');
+  const ip = host ? `${host.includes(':') ? '[' + host + ']' : host}${p.port ? ':' + p.port : ''}` : '—';
+  const progress = `${((Number(p.progress) || 0) * 100).toFixed(1)}%`;
+  const flags = peerFlagsText(p.flags);
+  const source = peerSourceText(p.source);
+  const connection = peerConnectionText(p.connectionType);
+  const totalDown = fmtBytes(p.totalDownload);
+  const totalUp = fmtBytes(p.totalUpload);
+  const local = p.localAddress ? ` · local ${p.localAddress}` : '';
+  const title = `${ip} · ${progress} · ${flags || 'no flags'} · ${source || 'unknown source'} · ${connection} · RTT ${torrentCount(p.rtt)} ms · total ↓ ${totalDown} · ↑ ${totalUp}${local}`;
+  return `
+    <div class="peer-row" title="${escapeHtml(title)}">
+      <div class="peer-ip">${escapeHtml(ip)}${p.seed ? ' <span class="peer-seed">seed</span>' : ''}</div>
+      <div class="peer-client">${escapeHtml(p.client || 'Unknown')}</div>
+      <div class="peer-rates">↓ ${torrentSpeed(p.downKbps)} · ↑ ${torrentSpeed(p.upKbps)}</div>
+      <div class="peer-progress">${progress} · ${torrentCount(p.pieces)} pcs</div>
+      <div class="peer-flags">${escapeHtml(flags || source || '—')}</div>
+    </div>`;
+}
+
+async function openPeerModal(t) {
+  peerModalId = t.id;
+  $('#peerModalName').textContent = t.name || t.source || 'this torrent';
+  $('#peerModalError').textContent = '';
+  $('#peerModalList').innerHTML = '<div class="peer-empty">Loading peers…</div>';
+  $('#peerModal').classList.add('open');
+  try {
+    const result = await window.api.torrents.getPeerList(t.id);
+    if (peerModalId !== t.id) return;
+    const peers = Array.isArray(result && result.peers) ? result.peers : [];
+    if (!peers.length) {
+      $('#peerModalList').innerHTML =
+        '<div class="peer-empty">No connected peers right now. The tracker or DHT may still be finding some.</div>';
+      return;
+    }
+    $('#peerModalList').innerHTML = peers.map(peerRowHtml).join('');
+  } catch (e) {
+    if (peerModalId !== t.id) return;
+    $('#peerModalList').innerHTML = '';
+    $('#peerModalError').textContent = String((e && e.message) || e)
+      .replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '');
+  }
+}
+
+function closePeerModal() {
+  $('#peerModal').classList.remove('open');
+  peerModalId = null;
+  $('#peerModalList').innerHTML = '';
+  $('#peerModalError').textContent = '';
+}
+
+$('#peerModalClose').addEventListener('click', closePeerModal);
+$('#peerModal').addEventListener('click', (e) => { if (e.target.id === 'peerModal') closePeerModal(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if ($('#limitModal').classList.contains('open')) closeLimitModal();
+  if ($('#peerModal').classList.contains('open')) closePeerModal();
+});
+
 
 // Connections
 async function renderConnections(forced) {
@@ -491,7 +1205,30 @@ async function loadSettings() {
   // convert stored kbps to selected unit for display
   const gKbps = parseInt(settings.globalSpeedLimitKbps || '0', 10) || 0;
   $('#setGlobalSpeed').value = unit === 'mbs' ? (gKbps / 8000) : (gKbps / 1000);
+  $('#torrentSaveDir').value = settings.torrentSaveDir || '';
+  $('#torrentMaxActive').value = settings.torrentMaxActive || 2;
+  $('#torrentPort').value = settings.torrentPort || 6881;
+  const tUpKbps = parseInt(settings.torrentUploadLimitKbps || '0', 10) || 0;
+  const tDownKbps = parseInt(settings.torrentDownloadLimitKbps || '0', 10) || 0;
+  const tUnit = torrentLimitUnit();
+  $('#torrentLimitUnit').value = tUnit;
+  $('#torrentUploadLimit').value = torrentKbpsToInput(tUpKbps, tUnit);
+  $('#torrentDownloadLimit').value = torrentKbpsToInput(tDownKbps, tUnit);
+  setTorrentLimitLabels(tUnit);
+  torrentLimitFormUnit = tUnit;
+  $('#torrentSeeding').checked = String(settings.torrentSeeding || '1') === '1';
+  $('#torrentRatioLimit').value = settings.torrentRatioLimit || 0;
+  $('#torrentUseAdapters').checked = String(settings.torrentUseAdapters || '1') === '1';
+  torrentQueue.max = parseInt(settings.torrentMaxActive || '2', 10) || 2;
   $('#setAutoUpdates').checked = String(settings.autoCheckUpdates || '1') === '1';
+  $('#setAutoStart').checked = String(settings.startWithWindows || '0') === '1';
+  try {
+    const info = await window.api.app.info();
+    if (info.platform !== 'win32' || !info.packaged) {
+      $('#setAutoStart').disabled = true;
+      $('#setAutoStartHint').textContent = 'Available in the installed Windows app.';
+    }
+  } catch {}
   queueState.max = parseInt(settings.maxConcurrentJobs || '3', 10) || 3;
   renderQueueState();
 }
@@ -502,6 +1239,50 @@ $('#setFolderBtn').addEventListener('click', async () => {
 $('#setTempDirBtn').addEventListener('click', async () => {
   const folder = await window.api.downloads.chooseFolder();
   if (folder) $('#setTempDir').value = folder;
+});
+$('#torrentSaveDirBtn').addEventListener('click', async () => {
+  const folder = await window.api.torrents.chooseFolder();
+  if (folder) $('#torrentSaveDir').value = folder;
+});
+// Changing the settings unit converts the fields, so the speed keeps its value.
+$('#torrentLimitUnit').addEventListener('change', () => {
+  const unit = $('#torrentLimitUnit').value === 'mb' ? 'mb' : 'kb';
+  if (unit === torrentLimitFormUnit) return;
+  for (const sel of ['#torrentUploadLimit', '#torrentDownloadLimit']) {
+    const kbps = torrentInputToKbps($(sel).value, torrentLimitFormUnit);
+    $(sel).value = torrentKbpsToInput(kbps, unit);
+  }
+  torrentLimitFormUnit = unit;
+  setTorrentLimitLabels(unit);
+});
+$('#saveTorrentSettings').addEventListener('click', async () => {
+  const tUnit = $('#torrentLimitUnit').value === 'mb' ? 'mb' : 'kb';
+  const upKbps = torrentInputToKbps($('#torrentUploadLimit').value, tUnit);
+  const downKbps = torrentInputToKbps($('#torrentDownloadLimit').value, tUnit);
+  const port = parseInt($('#torrentPort').value, 10) || 6881;
+  if (port < 1024 || port > 65535) {
+    toast('Choose a listening port between 1024 and 65535', 'error');
+    return;
+  }
+  try {
+    await window.api.settings.set({
+      torrentSaveDir: $('#torrentSaveDir').value.trim(),
+      torrentMaxActive: $('#torrentMaxActive').value,
+      torrentPort: String(port),
+      torrentUploadLimitKbps: String(upKbps),
+      torrentDownloadLimitKbps: String(downKbps),
+      torrentLimitUnit: tUnit,
+      torrentSeeding: $('#torrentSeeding').checked ? '1' : '0',
+      torrentRatioLimit: $('#torrentRatioLimit').value,
+      torrentUseAdapters: $('#torrentUseAdapters').checked ? '1' : '0'
+    });
+  } catch (e) {
+    toast(String((e && e.message) || e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''));
+    return;
+  }
+  await loadSettings();
+  await refreshTorrents();
+  toast('Torrent settings saved');
 });
 function renderUpdateBanner(s) {
   const banner = $('#updateBanner');
@@ -556,6 +1337,19 @@ $('#setAutoUpdates').addEventListener('change', async () => {
     toast(enabled === '1' ? 'Update checks enabled at startup' : 'Startup update checks disabled');
   } catch (e) {
     $('#setAutoUpdates').checked = !$('#setAutoUpdates').checked;
+    toast(String((e && e.message) || e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''));
+  }
+});
+$('#setAutoStart').addEventListener('change', async () => {
+  const enabled = $('#setAutoStart').checked ? '1' : '0';
+  try {
+    await window.api.settings.set({ startWithWindows: enabled });
+    settings.startWithWindows = enabled;
+    toast(enabled === '1'
+      ? 'Windows will start Ultra Downloader in the tray'
+      : 'Ultra Downloader will not start with Windows');
+  } catch (e) {
+    $('#setAutoStart').checked = !$('#setAutoStart').checked;
     toast(String((e && e.message) || e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''));
   }
 });
@@ -664,6 +1458,22 @@ window.api.on('queue:update', (s) => {
   queueState = { ...queueState, ...s };
   renderQueueState();
 });
+window.api.on('torrent:added', () => refreshTorrents());
+window.api.on('torrent:update', () => refreshTorrents());
+window.api.on('torrent:progress', (p) => {
+  if (!p) return;
+  updateTorrentCardLive(p);
+});
+window.api.on('torrent:removed', () => refreshTorrents());
+window.api.on('torrent:error', (p) => {
+  if (p && p.error) toast(`Torrent: ${p.error}`, 'error');
+  refreshTorrents();
+});
+window.api.on('torrent:queue', (s) => {
+  if (!s) return;
+  torrentQueue = { ...torrentQueue, ...s };
+  updateTorrentStats();
+});
 window.api.on('update:status', (s) => renderUpdateStatus(s));
 window.api.on('connections:update', (list) => {
   if (Array.isArray(list)) connections = list;
@@ -680,11 +1490,17 @@ window.api.on('speeds:update', (arr) => {
 // Init
 (async () => {
   await loadSettings();
+  await initOnboarding();
   await renderConnections();
   await refreshDownloads();
+  await refreshTorrents();
   try {
     const qs = await window.api.downloads.queueState();
     if (qs) { queueState = { ...queueState, ...qs }; renderQueueState(); }
+  } catch {}
+  try {
+    const tq = await window.api.torrents.queueState();
+    if (tq) { torrentQueue = { ...torrentQueue, ...tq }; updateTorrentStats(); }
   } catch {}
   try {
     const info = await window.api.app.info();

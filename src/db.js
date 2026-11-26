@@ -58,6 +58,31 @@ function init() {
       status TEXT DEFAULT 'pending',
       FOREIGN KEY(downloadId) REFERENCES downloads(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS torrents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source TEXT NOT NULL,
+      infoHash TEXT UNIQUE,
+      name TEXT,
+      saveDir TEXT,
+      totalSize INTEGER DEFAULT 0,
+      downloaded INTEGER DEFAULT 0,
+      uploaded INTEGER DEFAULT 0,
+      progress REAL DEFAULT 0,
+      downKbps REAL DEFAULT 0,
+      upKbps REAL DEFAULT 0,
+      peers INTEGER DEFAULT 0,
+      seeds INTEGER DEFAULT 0,
+      pieces INTEGER DEFAULT 0,
+      piecesTotal INTEGER DEFAULT 0,
+      state TEXT DEFAULT 'queued',
+      files TEXT DEFAULT '',
+      error TEXT,
+      createdAt INTEGER,
+      updatedAt INTEGER,
+      finishedAt INTEGER,
+      seeding INTEGER DEFAULT 1,
+      ratioLimit REAL DEFAULT 0
+    );
   `);
   // Part files used to always live next to the destination file; the folder is
   // now configurable, so each download records where its own parts are kept.
@@ -73,6 +98,35 @@ function init() {
   if (!cols.includes('activeMs')) db.exec('ALTER TABLE downloads ADD COLUMN activeMs INTEGER DEFAULT 0');
   // Time actually spent transferring (pauses excluded) and when it finished.
   if (!cols.includes('finishedAt')) db.exec('ALTER TABLE downloads ADD COLUMN finishedAt INTEGER');
+  // Torrent speed limits and the richer uTorrent-style status fields were
+  // added after the first torrent build, so existing databases get them here.
+  const torrentCols = db.prepare('PRAGMA table_info(torrents)').all().map((c) => c.name);
+  const torrentAdditions = {
+    uploadLimitKbps: 'INTEGER DEFAULT 0',
+    downloadLimitKbps: 'INTEGER DEFAULT 0',
+    etaSeconds: 'INTEGER DEFAULT -1',
+    totalDone: 'INTEGER DEFAULT 0',
+    totalWantedDone: 'INTEGER DEFAULT 0',
+    allTimeUpload: 'INTEGER DEFAULT 0',
+    allTimeDownload: 'INTEGER DEFAULT 0',
+    currentTracker: "TEXT DEFAULT ''",
+    nextAnnounceSec: 'INTEGER DEFAULT 0',
+    numComplete: 'INTEGER DEFAULT -1',
+    numIncomplete: 'INTEGER DEFAULT -1',
+    listPeers: 'INTEGER DEFAULT 0',
+    distributedCopies: 'REAL DEFAULT 0',
+    numConnections: 'INTEGER DEFAULT 0',
+    numUploads: 'INTEGER DEFAULT 0',
+    activeSeconds: 'INTEGER DEFAULT 0',
+    seedingSeconds: 'INTEGER DEFAULT 0',
+    // Payload rates exclude protocol overhead, so they can stay under a cap
+    // while the total (wire) rate shown elsewhere is higher.
+    uploadPayloadKbps: 'REAL DEFAULT 0',
+    downloadPayloadKbps: 'REAL DEFAULT 0'
+  };
+  for (const [name, type] of Object.entries(torrentAdditions)) {
+    if (!torrentCols.includes(name)) db.exec(`ALTER TABLE torrents ADD COLUMN ${name} ${type}`);
+  }
   // default settings
   const defaults = {
     downloadDir: path.join(app.getPath('downloads'), 'UltraDownloader'),
@@ -91,10 +145,23 @@ function init() {
     // 1.2.0 enables the Firefox bridge; 1.1.0 shipped it disabled.
     browserBridgeEnabled: '1',
     autoCheckUpdates: '1',
+    startWithWindows: '0',
+    autoStartPromptShown: '0',
     updateSkipVersion: '',
     updateLastCheck: '',
     extensionPromptShown: '0',
-    updateBannerDismissed: ''
+    updateBannerDismissed: '',
+    // Torrent engine. An empty torrentSaveDir means "use downloadDir".
+    torrentSaveDir: '',
+    torrentMaxActive: '2',
+    torrentPort: '6881',
+    torrentUploadLimitKbps: '0',
+    torrentDownloadLimitKbps: '0',
+    // Unit shown in the torrent limit fields (storage stays kbps).
+    torrentLimitUnit: 'kb',
+    torrentSeeding: '1',
+    torrentRatioLimit: '0',
+    torrentUseAdapters: '1'
   };
   const ins = db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)');
   for (const [k, v] of Object.entries(defaults)) ins.run(k, v);
@@ -167,6 +234,39 @@ function updateChunk(id, patch) {
   }
 }
 
+function listTorrents() { return db.prepare('SELECT * FROM torrents ORDER BY id DESC').all(); }
+function getTorrent(id) { return db.prepare('SELECT * FROM torrents WHERE id=?').get(id); }
+function getTorrentByHash(infoHash) { return db.prepare('SELECT * FROM torrents WHERE infoHash=?').get(infoHash); }
+function createTorrent(t) {
+  const info = db.prepare(`INSERT INTO torrents(source,infoHash,name,saveDir,totalSize,downloaded,uploaded,progress,downKbps,upKbps,uploadPayloadKbps,downloadPayloadKbps,peers,seeds,pieces,piecesTotal,state,files,error,createdAt,updatedAt,finishedAt,seeding,ratioLimit,uploadLimitKbps,downloadLimitKbps,etaSeconds,totalDone,totalWantedDone,allTimeUpload,allTimeDownload,currentTracker,nextAnnounceSec,numComplete,numIncomplete,listPeers,distributedCopies,numConnections,numUploads,activeSeconds,seedingSeconds)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    t.source, t.infoHash || null, t.name || '', t.saveDir || '', t.totalSize || 0, t.downloaded || 0,
+    t.uploaded || 0, t.progress || 0, t.downKbps || 0, t.upKbps || 0,
+    t.uploadPayloadKbps || 0, t.downloadPayloadKbps || 0, t.peers || 0, t.seeds || 0,
+    t.pieces || 0, t.piecesTotal || 0, t.state || 'queued', t.files || '', t.error || null,
+    Date.now(), Date.now(), t.finishedAt || null, t.seeding == null ? 1 : (t.seeding ? 1 : 0),
+    t.ratioLimit || 0, t.uploadLimitKbps || 0, t.downloadLimitKbps || 0,
+    t.etaSeconds == null ? -1 : t.etaSeconds, t.totalDone || 0, t.totalWantedDone || 0,
+    t.allTimeUpload || 0, t.allTimeDownload || 0, t.currentTracker || '',
+    t.nextAnnounceSec || 0, t.numComplete == null ? -1 : t.numComplete,
+    t.numIncomplete == null ? -1 : t.numIncomplete, t.listPeers || 0,
+    t.distributedCopies || 0, t.numConnections || 0, t.numUploads || 0,
+    t.activeSeconds || 0, t.seedingSeconds || 0);
+  return info.lastInsertRowid;
+}
+function updateTorrent(id, patch) {
+  const keys = Object.keys(patch);
+  if (!keys.length) return;
+  const set = keys.map(k => `${k}=?`).join(',');
+  try {
+    db.prepare(`UPDATE torrents SET ${set}, updatedAt=? WHERE id=?`).run(...keys.map(k => patch[k]), Date.now(), id);
+  } catch (e) {
+    console.error('updateTorrent err', id, JSON.stringify(patch), e.message);
+    throw e;
+  }
+}
+function deleteTorrent(id) { db.prepare('DELETE FROM torrents WHERE id=?').run(id); }
+
 function listConnections() { return db.prepare('SELECT * FROM connections').all(); }
 function upsertConnection(c) {
   db.prepare(`INSERT INTO connections(id,name,localAddress,interfaceIndex,enabled,capKbps,lastSpeed) VALUES(?,?,?,?,?,?,?)
@@ -180,5 +280,6 @@ module.exports = {
   init, getSettings, setSettings,
   listDownloads, getDownload, createDownload, updateDownload, deleteDownload,
   getChunks, replaceChunks, updateChunk,
+  listTorrents, getTorrent, getTorrentByHash, createTorrent, updateTorrent, deleteTorrent,
   listConnections, upsertConnection, setConnectionEnabled, setConnectionCap
 };

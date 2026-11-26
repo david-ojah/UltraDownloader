@@ -8,7 +8,42 @@ and builds the finished file only once every piece has arrived. It is designed
 to survive huge downloads, flaky links and expired file-host URLs without
 starting over.
 
-**Current version: 1.2.0**
+**Current version: 1.3.0**
+
+---
+
+## What's new in 1.3.0
+
+- **Torrent downloading is built in.** Add a magnet link or a `.torrent` URL on
+  the **Torrents** tab, or open a magnet link or `.torrent` file from Windows.
+  The embedded libtorrent engine handles peer discovery, DHT, trackers and
+  piece verification on a token-protected loopback port.
+- **Choose files before downloading.** **Files** on a torrent card lets you
+  uncheck files whose pieces should not be fetched.
+- **Seeding, pause, resume, remove and restart resume.** Seeding is on by
+  default and continues after a download finishes. Pause, resume or remove a
+  torrent from its card; torrents resume from their existing data after the
+  app restarts.
+- **Per-torrent upload and download limits.** Set each torrent's own caps in
+  KB/s or MB/s from **Limits**; switching the unit keeps the entered speed the
+  same. A per-torrent value of 0 inherits the global torrent limit.
+- **Payload upload rate shown separately.** The card's upload rate is payload
+  traffic; the total in parentheses adds protocol and wire overhead, so it can
+  read higher while payload stays at or under the limit.
+- **Update trackers.** Forces an immediate tracker announce and scrape;
+  trackers still enforce their `min_interval`.
+- **Low-upload compatibility.** Torrent limits count payload bytes only and the
+  engine keeps fixed unchoke slots, so a small upload cap does not starve the
+  download.
+- **In-app two-slide onboarding.** The first installed launch shows a feature
+  tour, then a **Start with Windows** choice. **No** leaves it off;
+  **Settings → Start Ultra Downloader when Windows starts** changes it later.
+  No native Start with Windows dialog opens.
+- **Start with Windows is opt-in and starts hidden in the tray**, so downloads
+  and the Firefox bridge are ready after you sign in.
+- Everything from 1.2.0 is still here: the Firefox bridge and first-run prompt,
+  the all-tabs update banner, the multi-connection download engine, the queue,
+  resume and data-preserving updates.
 
 ---
 
@@ -20,8 +55,8 @@ starting over.
 - **The bridge is on by default** for both new installs and upgrades from
   1.1.0.
 - **Direct links and extensionless file-host buttons** are supported.
-- **First-run prompt.** The first time 1.2.0 starts, it offers to install the
-  Firefox extension and opens the AMO page if you say Yes.
+- **First-run Firefox prompt.** The first time 1.2.0 starts, a native dialog
+  offers to install the Firefox extension and opens the AMO page if you say Yes.
 - **Settings → Firefox extension → Get Firefox extension** opens the same page
   later.
 - If the app is not running, Firefox downloads normally.
@@ -104,7 +139,7 @@ No account or background service is required. The Firefox extension is optional.
 ## Install
 
 1. Open the **Releases** page of this repository.
-2. Download `Ultra.Downloader.Setup.1.2.0.exe`.
+2. Download `Ultra.Downloader.Setup.1.3.0.exe`.
 3. Run the installer and choose an install folder.
 
 The installer is currently **unsigned**, so Windows SmartScreen may show
@@ -139,9 +174,10 @@ running, Firefox downloads are handed to the app instead of being saved by the
 browser.
 
 1. Install Ultra Downloader **1.2.0 or newer**.
-2. On first launch, say **Yes** to the Firefox extension prompt, or use
-   **Settings → Firefox extension → Get Firefox extension**. You can also load
-   it temporarily with `npx web-ext run --source-dir extension` for development.
+2. On first launch, say **Yes** to the Firefox extension prompt (a native
+   dialog), or use **Settings → Firefox extension → Get Firefox extension**.
+   You can also load it temporarily with `npx web-ext run --source-dir extension`
+   for development.
 3. Leave Ultra Downloader running (the window may be closed to the tray).
 4. Click any download link, including file-host buttons whose URL has no file
    extension.
@@ -161,6 +197,50 @@ The extension has no popup, options page or history. It talks only to
 `127.0.0.1`; no links or browsing data leave the PC. The bridge stays available
 while Ultra Downloader is minimised or closed to the tray; it stops only when
 the app is fully quit.
+
+The Firefox extension prompt remains a native Windows dialog. The **Start with
+Windows** choice is part of the separate in-app onboarding overlay.
+
+---
+
+## Torrents
+
+Ultra Downloader downloads and seeds BitTorrent content with an embedded
+libtorrent engine (`resources\torrent\sidecar.exe`). The engine is a separate
+local process; the app talks to it over a token-protected loopback port, so it
+is not reachable from the network.
+
+- Add a magnet link or a `.torrent` URL on the **Torrents** tab, or open a
+  `.torrent` file or `magnet:` link from Windows — the installer registers both
+  associations.
+- Each card shows progress, ETA, peers, seeds, rates, ratio, total wanted/done,
+  all-time transfer, pieces, tracker, swarm counts, connections, distributed
+  copies, active/seeding time and the effective speed limits. **Files** lets you
+  uncheck files before their pieces are downloaded. **Update trackers** forces
+  an immediate tracker announce and scrape; libtorrent still honours each
+  tracker's `min_interval`, so clicking again too soon is rate-limited.
+- **Limits** sets per-torrent upload and download caps in KB/s or MB/s (the
+  settings card picks the default unit); switching the unit converts the entered
+  values so the speed stays the same. **Peers** lists the connected peers with
+  their IP, client, rates, progress and flags. A per-torrent value of 0 inherits
+  the global torrent limit, and a global value of 0 means unlimited. Limits are
+  kept across restarts.
+- Seeding is **on by default** and continues after a download finishes. Pause a
+  card (or **Pause all**) to stop seeding; **Stop seeding at ratio** ends it
+  automatically.
+- Torrents honour **Max active torrents** and, by default, bind to the adapters
+  enabled on the **Connections** tab.
+- libtorrent does not rate-limit peers on the local network by default, so a
+  LAN peer can still transfer faster than the configured cap. Remote peers are
+  always limited.
+- Torrent upload limits apply to payload traffic, and the card's upload rate is
+  the payload rate too. The total in parentheses includes protocol and wire
+  overhead, so it can read higher than the cap while payload stays at or under
+  it. Wire traffic may be slightly higher because TCP/IP overhead is excluded
+  from the cap, and remote peers can still choke or refuse uploads based on
+  reciprocity expectations.
+- Only download and share content you have the right to. Ultra Downloader does
+  not host, index or search for torrents.
 
 ---
 
@@ -341,10 +421,24 @@ need the download list or resume data.
 | Global speed limit | 0 (unlimited) | Total download speed cap. 0 means no limit. |
 | Speed unit | Mbps | How speeds are displayed (Mbps or MB/s). |
 | Check for updates at startup | On | Check once when the app starts. **Check now** is always available in Settings. |
+| Start with Windows | Off | Launch hidden in the tray after you sign in. |
+| Torrent download folder | empty | Where torrent files are written. Empty = the download folder. |
+| Max active torrents | 2 | Torrents downloading at the same time. Seeding does not use a slot. |
+| Torrent listening port | 6881 | TCP/UDP port used by the torrent engine. |
+| Torrent limit unit | KB/s | Unit used by the torrent upload and download limits: KB/s or MB/s. 1 KB/s = 8 kbps; 1 MB/s = 8000 kbps. |
+| Torrent upload limit | 0 (unlimited) | Upload speed cap for torrents, in the torrent limit unit. 0 means no limit. |
+| Torrent download limit | 0 (unlimited) | Download speed cap for torrents, in the torrent limit unit. 0 means no limit. |
+| Keep seeding | On | Continue seeding after a torrent finishes. |
+| Stop seeding at ratio | 0 (never) | Stop seeding when uploaded/downloaded reaches this ratio. |
+| Use enabled adapters | On | Bind the torrent engine to the adapters enabled on Connections. |
 
 Settings are saved with **Save Settings**. Both folders are created and checked
-when you save, so a typo is reported immediately. The update preference saves
-immediately when toggled.
+when you save, so a typo is reported immediately. The update and startup
+preferences save immediately when toggled. Per-torrent speed limits are set from
+each torrent card's **Limits** dialog; 0 there inherits the global torrent limit.
+The dialog starts in the global torrent limit unit. Changing either unit
+selector (in Settings or in the dialog) converts the entered speeds to the new
+unit, so the limit keeps its value.
 
 ---
 
@@ -390,12 +484,23 @@ from their part files. Downloads you paused yourself stay paused until you press
 # Install dependencies
 npm install
 
+# Build the native torrent engine (libtorrent + OpenSSL)
+npm run build:torrent
+
 # Run the app in development
 npm start
 
 # Build the Windows x64 installer
 npm run dist
 ```
+
+The torrent engine is a native sidecar built against a static libtorrent with
+encryption (OpenSSL) enabled. `npm run build:torrent` writes
+`resources\torrent\sidecar.exe`; it is not committed. Prerequisites and the
+full libtorrent/OpenSSL build recipe are in
+[tools/torrent-engine/README.md](tools/torrent-engine/README.md). Run it before
+`npm run dist`, because `extraResources` copies `resources\torrent` into the
+installer.
 
 The installer is written to `dist\Ultra.Downloader.Setup.<version>.exe`.
 The updater metadata is written to `dist\latest.yml`.
@@ -447,9 +552,14 @@ and deny all client writes.
 main.js                 Electron main process: window, tray, IPC, notifications
 preload.js              Safe IPC bridge exposed to the renderer
 src/db.js               SQLite schema, settings and download rows
+src/autostart.js        Start with Windows login-item helper
 src/downloader.js       Queue, range engine, resume, assembly, retries, limits
 src/connections.js      Network adapter detection and per-adapter settings
 src/linkgrabber.js      Scans a web page for downloadable links
+src/torrents.js         Torrent queue, state mapping and persistence
+src/torrent-engine/     Sidecar client and adapter GUID helper
+tools/torrent-engine/   Native sidecar source, build script and README
+resources/torrent/      Built sidecar.exe (local only, git-ignored)
 renderer/index.html     App shell and tabs
 renderer/renderer.js    Cards, queue state, settings UI
 renderer/styles.css     Theme and layout
@@ -472,6 +582,17 @@ MIT. See [LICENSE](LICENSE).
 ---
 
 ## Version history
+
+### 1.3.0
+- Added built-in torrent downloading from magnet links and `.torrent` files,
+  with file selection, seeding, pause/resume/remove and restart resume.
+- Added per-torrent upload and download limits with a KB/s or MB/s selector.
+- Added the payload upload rate separate from the total wire rate, an Update
+  trackers action and low-upload compatibility settings.
+- Added the two-slide in-app onboarding overlay with the feature tour and the
+  Start with Windows choice. Start with Windows is opt-in and starts hidden in
+  the tray.
+- Retained all 1.2.0 features.
 
 ### 1.2.0
 - Enabled the Firefox download bridge by default.

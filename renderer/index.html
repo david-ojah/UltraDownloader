@@ -23,6 +23,10 @@
         <span class="nav-icon">⬇</span><span>Downloads</span>
       </button>
 
+      <button class="nav-item" data-tab="torrents">
+        <span class="nav-icon">🧲</span><span>Torrents</span>
+      </button>
+
       <button class="nav-item" data-tab="finished">
         <span class="nav-icon">✓</span><span>Finished</span>
         <span class="nav-badge" id="navFinishedCount">0</span>
@@ -95,6 +99,27 @@
           </div>
         </div>
         <div class="list" id="downloadList"></div>
+      </section>
+
+      <!-- Torrents -->
+      <section id="tab-torrents" class="panel">
+        <div class="composer">
+          <input id="quickMagnet" placeholder="Paste a magnet link or .torrent URL and press Enter..." />
+          <button id="addTorrent" class="btn primary">Add Torrent</button>
+        </div>
+        <div class="toolbar queue-toolbar">
+          <span class="hint" id="torrentQueueStatus">Torrents start automatically.</span>
+          <div class="toolbar-end">
+            <button id="pauseAllTorrents" class="btn sm ghost">Pause all</button>
+            <button id="resumeAllTorrents" class="btn sm ghost">Resume all</button>
+          </div>
+        </div>
+        <p class="hint" style="margin-bottom:12px">
+          Only download and share content you have the right to. Ultra Downloader does not host,
+          index or search for torrents; it only connects to the trackers and peers in the link you add.
+          Seeding continues after the download finishes until you pause or remove the torrent.
+        </p>
+        <div class="list" id="torrentList"></div>
       </section>
 
       <!-- Finished -->
@@ -196,6 +221,75 @@
 
         <div class="settings-card" style="margin-top:16px">
           <div class="settings-group">
+            <label class="check-row">
+              <input type="checkbox" id="setAutoStart" />
+              <span>Start Ultra Downloader when Windows starts</span>
+            </label>
+            <p class="settings-hint" id="setAutoStartHint">Starts hidden in the tray so downloads and the Firefox bridge are ready after you sign in.</p>
+          </div>
+        </div>
+
+        <div class="settings-card" style="margin-top:16px">
+          <div class="settings-group">
+            <label for="torrentSaveDir">Torrent download folder</label>
+            <div class="input-row">
+              <input id="torrentSaveDir" spellcheck="false" placeholder="Same as the download folder" />
+              <button id="torrentSaveDirBtn" class="btn ghost">Browse</button>
+            </div>
+            <p class="settings-hint">Torrent files are written here. Leave empty to use the download folder.</p>
+          </div>
+          <div class="settings-grid">
+            <div class="settings-group">
+              <label for="torrentMaxActive">Max active torrents</label>
+              <input id="torrentMaxActive" type="number" min="1" max="10" />
+            </div>
+            <div class="settings-group">
+              <label for="torrentPort">Listening port</label>
+              <input id="torrentPort" type="number" min="1024" max="65535" />
+            </div>
+            <div class="settings-group">
+              <label for="torrentLimitUnit">Limit unit</label>
+              <select id="torrentLimitUnit">
+                <option value="kb">KB/s</option>
+                <option value="mb">MB/s</option>
+              </select>
+            </div>
+            <div class="settings-group">
+              <label for="torrentUploadLimit">Upload limit (<span id="torrentUploadUnitLabel">KB/s</span>, 0 = unlimited)</label>
+              <input id="torrentUploadLimit" type="number" min="0" step="0.1" />
+            </div>
+            <div class="settings-group">
+              <label for="torrentDownloadLimit">Download limit (<span id="torrentDownloadUnitLabel">KB/s</span>, 0 = unlimited)</label>
+              <input id="torrentDownloadLimit" type="number" min="0" step="0.1" />
+            </div>
+            <div class="settings-group">
+              <label for="torrentRatioLimit">Stop seeding at ratio (0 = never)</label>
+              <input id="torrentRatioLimit" type="number" min="0" step="0.1" />
+            </div>
+          </div>
+          <div class="settings-group">
+            <label class="check-row">
+              <input type="checkbox" id="torrentSeeding" />
+              <span>Keep seeding after the download finishes</span>
+            </label>
+          </div>
+          <div class="settings-group">
+            <label class="check-row">
+              <input type="checkbox" id="torrentUseAdapters" />
+              <span>Use enabled network adapters</span>
+            </label>
+            <p class="settings-hint">Binds the torrent engine to the adapters enabled on the Connections tab.</p>
+          </div>
+          <p class="settings-hint" style="margin-bottom:16px">
+            Port and adapter changes apply the next time the torrent engine starts (after active
+            torrents stop or the app restarts). Per-torrent limits are set from each torrent card;
+            0 there inherits these global limits.
+          </p>
+          <button id="saveTorrentSettings" class="btn primary">Save torrent settings</button>
+        </div>
+
+        <div class="settings-card" style="margin-top:16px">
+          <div class="settings-group">
             <label>Firefox extension</label>
             <p class="settings-hint">Hand Firefox downloads to Ultra Downloader.</p>
             <button id="getFirefoxExtension" class="btn ghost">Get Firefox extension</button>
@@ -204,6 +298,73 @@
       </section>
     </div>
   </main>
+</div>
+
+<div id="onboarding" class="onboarding" hidden>
+  <div class="onboarding-card" role="dialog" aria-modal="true" aria-labelledby="onboardingTitle">
+    <div class="onboarding-head">
+      <div>
+        <h2 id="onboardingTitle">Welcome to Ultra Downloader</h2>
+        <p>Two quick slides before you start. Everything here can be changed later in Settings.</p>
+      </div>
+      <div class="onboarding-progress" aria-hidden="true">
+        <span class="onboarding-dot active" data-dot="1"></span>
+        <span class="onboarding-dot" data-dot="2"></span>
+      </div>
+    </div>
+
+    <section class="onboarding-slide" data-slide="1">
+      <div class="onboarding-features">
+        <div class="onboarding-feature">
+          <strong>Multi-connection downloads</strong>
+          <span>HTTP downloads use several streams at once, split into resumable chunks.</span>
+        </div>
+        <div class="onboarding-feature">
+          <strong>Firefox handoff</strong>
+          <span>When the bridge is running, Firefox downloads are handed to the app queue.</span>
+        </div>
+        <div class="onboarding-feature">
+          <strong>Torrents with speed limits</strong>
+          <span>Magnet links and .torrent files, with per-torrent or global upload and download caps.</span>
+        </div>
+        <div class="onboarding-feature">
+          <strong>Update banner and notifications</strong>
+          <span>New releases show a banner in the app; install one only when you choose to.</span>
+        </div>
+        <div class="onboarding-feature">
+          <strong>Tray persistence</strong>
+          <span>Closing the window keeps downloads and the Firefox bridge running in the tray.</span>
+        </div>
+        <div class="onboarding-feature">
+          <strong>Data safety</strong>
+          <span>Part files resume after a restart, and finished files stay where you saved them.</span>
+        </div>
+      </div>
+      <div class="onboarding-actions">
+        <button class="btn primary" id="onboardingNext" type="button">Next</button>
+      </div>
+    </section>
+
+    <section class="onboarding-slide" data-slide="2" hidden>
+      <h3>Start with Windows?</h3>
+      <p class="onboarding-lead">Ultra Downloader can start hidden in the tray when you sign in, so downloads and the Firefox bridge are ready right away.</p>
+      <div class="onboarding-choices">
+        <button class="onboarding-choice" id="onboardingYes" type="button" aria-pressed="false">
+          <strong>Yes, start with Windows</strong>
+          <span>Launch hidden in the tray after you sign in.</span>
+        </button>
+        <button class="onboarding-choice" id="onboardingNo" type="button" aria-pressed="false">
+          <strong>No, not now</strong>
+          <span>Start Ultra Downloader yourself when you need it.</span>
+        </button>
+      </div>
+      <p class="onboarding-hint">You can change this later in Settings → Start Ultra Downloader when Windows starts.</p>
+      <div class="onboarding-actions">
+        <button class="btn ghost" id="onboardingBack" type="button">Back</button>
+        <button class="btn primary" id="onboardingContinue" type="button" disabled>Continue</button>
+      </div>
+    </section>
+  </div>
 </div>
 
 <div class="toast-container" id="toasts"></div>
@@ -227,6 +388,76 @@
       <button class="btn ghost" id="linkModalCancel">Cancel</button>
       <button class="btn primary" id="linkModalSave">Verify &amp; resume</button>
     </div>
+  </div>
+</div>
+
+<!-- Choose torrent files -->
+<div class="modal-backdrop" id="fileModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>Choose torrent files</h3>
+      <button class="modal-close" id="fileModalClose" aria-label="Close">×</button>
+    </div>
+    <p class="modal-text">
+      Uncheck files you do not want. The selection applies to pieces that have not been
+      downloaded yet; already downloaded files stay on disk.
+    </p>
+    <div class="modal-file-list" id="fileModalList"></div>
+    <div class="modal-error" id="fileModalError"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="fileModalCancel">Cancel</button>
+      <button class="btn primary" id="fileModalSave">Apply</button>
+    </div>
+  </div>
+</div>
+<!-- Per-torrent speed limits -->
+<div class="modal-backdrop" id="limitModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>Speed limits</h3>
+      <button class="modal-close" id="limitModalClose" aria-label="Close">×</button>
+    </div>
+    <p class="modal-text">
+      Limits for <strong id="limitModalName">this torrent</strong>, in the unit selected below.
+      A value of 0 inherits the global torrent limit.
+    </p>
+    <div class="settings-grid">
+      <div class="settings-group">
+        <label for="limitModalUnit">Limit unit</label>
+        <select id="limitModalUnit">
+          <option value="kb">KB/s</option>
+          <option value="mb">MB/s</option>
+        </select>
+      </div>
+      <div class="settings-group">
+        <label for="limitModalUpload">Upload limit (<span id="limitModalUploadUnitLabel">KB/s</span>, 0 = inherit)</label>
+        <input id="limitModalUpload" type="number" min="0" step="any" />
+      </div>
+      <div class="settings-group">
+        <label for="limitModalDownload">Download limit (<span id="limitModalDownloadUnitLabel">KB/s</span>, 0 = inherit)</label>
+        <input id="limitModalDownload" type="number" min="0" step="any" />
+      </div>
+    </div>
+    <p class="modal-text" id="limitModalEffective"></p>
+    <div class="modal-error" id="limitModalError"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="limitModalInherit">Use global limits</button>
+      <button class="btn ghost" id="limitModalCancel">Cancel</button>
+      <button class="btn primary" id="limitModalSave">Save limits</button>
+    </div>
+  </div>
+</div>
+
+<!-- Connected peers -->
+<div class="modal-backdrop" id="peerModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>Peers</h3>
+      <button class="modal-close" id="peerModalClose" aria-label="Close">×</button>
+    </div>
+    <p class="modal-text">Connected peers for <strong id="peerModalName">this torrent</strong>.</p>
+    <div class="peer-list" id="peerModalList"></div>
+    <div class="modal-error" id="peerModalError"></div>
   </div>
 </div>
 <script src="renderer.js"></script>
