@@ -2,7 +2,7 @@
 
 // Torrent queue and engine integration.
 //
-// The actual BitTorrent work happens in the native sidecar (libtorrent). This
+// The actual BitTorrent work happens in the native libtorrent addon. This
 // module owns the queue, maps libtorrent states onto the app's states, keeps
 // the torrents table up to date and forwards events to the renderer:
 //
@@ -22,7 +22,7 @@ const { app } = require('electron');
 
 const db = require('./db');
 const connections = require('./connections');
-const { TorrentSidecar } = require('./torrent-engine/sidecar');
+const { TorrentEngine } = require('./torrent-engine/engine');
 const adapters = require('./torrent-engine/adapters');
 
 const POLL_MS = 2000;
@@ -30,7 +30,7 @@ const ACTIVE_STATES = new Set(['downloading', 'checking']);
 const POLLED_STATES = new Set(['downloading', 'checking', 'seeding']);
 
 let send = () => {};
-let sidecar = null;
+let engine = null;
 let settings = {};
 let pollTimer = null;
 let polling = false;
@@ -66,37 +66,25 @@ function init(sendFn) {
   }
 }
 
-async function ensureSidecar() {
-  if (sidecar && sidecar.port && !sidecar.exited) return sidecar;
-  if (sidecar) {
-    try { await sidecar.stop(); } catch {}
-    sidecar = null;
-  }
-  const sc = new TorrentSidecar();
-  try {
-    await sc.start();
-    const info = await sc.ping();
-    if (info && info.version) sc.libtorrentVersion = info.version;
-    // The session may be created later by startTorrent/setInterfaces; store the
-    // saved global limits first so base_settings_pack uses them.
-    await sc.setSessionLimits(
-      limitKbps(settings.torrentUploadLimitKbps),
-      limitKbps(settings.torrentDownloadLimitKbps)
-    );
-  } catch (e) {
-    try { await sc.stop(); } catch {}
-    throw e;
-  }
-  sidecar = sc;
+async function ensureEngine() {
+  if (engine) return engine;
+  const next = new TorrentEngine();
+  // The session may be created later by startTorrent/setInterfaces; store the
+  // saved global limits first so base_settings_pack uses them.
+  await next.setSessionLimits(
+    limitKbps(settings.torrentUploadLimitKbps),
+    limitKbps(settings.torrentDownloadLimitKbps)
+  );
+  engine = next;
   interfacesReady = false;
-  return sidecar;
+  return engine;
 }
 
 // Bind the libtorrent session to the adapters the user enabled. This must run
 // before the first startTorrent: applying listen settings to a live session
 // was unreliable on Windows with libtorrent 2.0.11.
 async function ensureInterfaces() {
-  if (interfacesReady || !sidecar || !sidecar.port) return;
+  if (interfacesReady || !engine) return;
   if (String(settings.torrentUseAdapters || '1') === '1') {
     const enabled = connections.enabledConnections();
     const addresses = [...new Set(enabled.map((c) => c.localAddress).filter(Boolean))];
@@ -112,7 +100,7 @@ async function ensureInterfaces() {
       const options = { port: parseInt(settings.torrentPort, 10) || 6881 };
       if (guids.length === addresses.length && guids.every(Boolean)) options.guids = guids;
       try {
-        await sidecar.setInterfaces(addresses, options);
+        await engine.setInterfaces(addresses, options);
       } catch (e) {
         // Keep going with the default listener rather than failing the add.
         console.error('torrent interfaces:', e && e.message ? e.message : e);
@@ -213,16 +201,16 @@ function limitKbps(value) {
 }
 
 async function applyLimits(row) {
-  if (!sidecar || !sidecar.port || !row || !row.infoHash) return;
+  if (!engine || !row || !row.infoHash) return;
   const upload = limitKbps(row.uploadLimitKbps) || limitKbps(settings.torrentUploadLimitKbps);
   const download = limitKbps(row.downloadLimitKbps) || limitKbps(settings.torrentDownloadLimitKbps);
   try {
-    await sidecar.setLimits(row.infoHash, upload, download);
+    await engine.setLimits(row.infoHash, upload, download);
   } catch {}
 }
 
 async function startRow(row) {
-  const sc = await ensureSidecar();
+  const native = await ensureEngine();
   await ensureInterfaces();
   let local = row.source;
   let temp = null;
@@ -231,7 +219,7 @@ async function startRow(row) {
     local = temp;
   }
   try {
-    const result = await sc.startTorrent(local, row.saveDir);
+    const result = await native.startTorrent(local, row.saveDir);
     if (!result || !result.infoHash) throw new Error('torrent engine did not return an info hash');
     await applyLimits({ ...row, infoHash: result.infoHash });
     const patch = { infoHash: result.infoHash };
@@ -242,7 +230,7 @@ async function startRow(row) {
       try {
         const stored = JSON.parse(row.files);
         if (Array.isArray(stored) && stored.length) {
-          await sc.setFilePriorities(result.infoHash, stored.map((f) => Number(f.priority) || 0));
+          await native.setFilePriorities(result.infoHash, stored.map((f) => Number(f.priority) || 0));
         }
       } catch {}
     }
@@ -257,7 +245,7 @@ async function startRow(row) {
 async function add(source, opts = {}) {
   const normalized = normalizeSource(source);
   const saveDir = resolveSaveDir(opts);
-  const sc = await ensureSidecar();
+  const native = await ensureEngine();
   await ensureInterfaces();
 
   let local = normalized.source;
@@ -268,7 +256,7 @@ async function add(source, opts = {}) {
   }
   let result;
   try {
-    result = await sc.startTorrent(local, saveDir);
+    result = await native.startTorrent(local, saveDir);
   } finally {
     if (temp) {
       try { fs.unlinkSync(temp); } catch {}
@@ -286,12 +274,12 @@ async function add(source, opts = {}) {
       error: null,
     });
     if (row.state === 'paused') {
-      try { await sc.pauseTorrent(result.infoHash); } catch {}
+      try { await native.pauseTorrent(result.infoHash); } catch {}
     } else if (row.state === 'completed' && !seedingAllowed(row)) {
-      try { await sc.pauseTorrent(result.infoHash); } catch {}
+      try { await native.pauseTorrent(result.infoHash); } catch {}
     } else {
       if (row.state === 'queued' || queueHeld) {
-        try { await sc.pauseTorrent(result.infoHash); } catch {}
+        try { await native.pauseTorrent(result.infoHash); } catch {}
       }
       db.updateTorrent(row.id, { state: 'queued' });
     }
@@ -300,7 +288,7 @@ async function add(source, opts = {}) {
     const active = db.listTorrents().filter((r) => ACTIVE_STATES.has(r.state)).length;
     const state = queueHeld || active >= maxActive() ? 'queued' : 'downloading';
     if (state === 'queued') {
-      try { await sc.pauseTorrent(result.infoHash); } catch {}
+      try { await native.pauseTorrent(result.infoHash); } catch {}
     }
     const id = db.createTorrent({
       source: normalized.source,
@@ -336,9 +324,9 @@ async function add(source, opts = {}) {
 async function pause(id) {
   const row = db.getTorrent(id);
   if (!row) throw new Error('torrent not found');
-  if (sidecar && sidecar.port && row.infoHash) {
+  if (engine && row.infoHash) {
     try {
-      await sidecar.pauseTorrent(row.infoHash);
+      await engine.pauseTorrent(row.infoHash);
     } catch (e) {
       if (!/unknown infoHash/i.test(e && e.message ? e.message : '')) throw e;
     }
@@ -355,8 +343,8 @@ async function pauseAll() {
   const rows = db.listTorrents().filter((r) =>
     ACTIVE_STATES.has(r.state) || r.state === 'seeding' || r.state === 'queued');
   for (const row of rows) {
-    if (sidecar && sidecar.port && row.infoHash) {
-      try { await sidecar.pauseTorrent(row.infoHash); } catch {}
+    if (engine && row.infoHash) {
+      try { await engine.pauseTorrent(row.infoHash); } catch {}
     }
     db.updateTorrent(row.id, { state: 'paused', downKbps: 0, upKbps: 0 });
     emit('torrent:update', db.getTorrent(row.id));
@@ -381,11 +369,11 @@ async function resumeAll() {
 async function resume(id) {
   const row = db.getTorrent(id);
   if (!row) throw new Error('torrent not found');
-  const sc = await ensureSidecar();
+  const native = await ensureEngine();
   await ensureInterfaces();
   if (row.infoHash) {
     try {
-      await sc.resumeTorrent(row.infoHash);
+      await native.resumeTorrent(row.infoHash);
     } catch (e) {
       if (/unknown infoHash/i.test(e && e.message ? e.message : '')) await startRow(row);
       else throw e;
@@ -400,7 +388,7 @@ async function resume(id) {
   if (active < maxActive()) {
     db.updateTorrent(id, { state: 'downloading', error: null });
   } else {
-    try { await sc.pauseTorrent(row.infoHash); } catch {}
+    try { await native.pauseTorrent(row.infoHash); } catch {}
     db.updateTorrent(id, { state: 'queued', error: null });
   }
   emit('torrent:update', db.getTorrent(id));
@@ -412,9 +400,9 @@ async function resume(id) {
 async function remove(id, opts = {}) {
   const row = db.getTorrent(id);
   if (!row) return { removed: false };
-  if (sidecar && sidecar.port && row.infoHash) {
+  if (engine && row.infoHash) {
     try {
-      await sidecar.removeTorrent(row.infoHash, !!opts.deleteFiles);
+      await engine.removeTorrent(row.infoHash, !!opts.deleteFiles);
     } catch (e) {
       if (!/unknown infoHash/i.test(e && e.message ? e.message : '')) {
         console.error('torrent remove:', e && e.message ? e.message : e);
@@ -434,13 +422,13 @@ async function setFilePriorities(id, priorities) {
   const row = db.getTorrent(id);
   if (!row) throw new Error('torrent not found');
   if (!row.infoHash) throw new Error('torrent has not started yet');
-  const sc = await ensureSidecar();
+  const native = await ensureEngine();
   await ensureInterfaces();
   const list = (Array.isArray(priorities) ? priorities : []).map((v) => {
     const n = Number(v);
     return Number.isFinite(n) ? Math.max(0, Math.min(7, Math.trunc(n))) : 4;
   });
-  const result = await sc.setFilePriorities(row.infoHash, list);
+  const result = await native.setFilePriorities(row.infoHash, list);
   const files = Array.isArray(result.files) ? result.files : [];
   db.updateTorrent(id, { files: JSON.stringify(files) });
   const fresh = db.getTorrent(id);
@@ -471,18 +459,18 @@ async function getPeerList(id) {
   const row = db.getTorrent(id);
   if (!row) throw new Error('torrent not found');
   if (!row.infoHash) return { infoHash: '', peers: [] };
-  const sc = await ensureSidecar();
+  const native = await ensureEngine();
   await ensureInterfaces();
-  return sc.getPeerList(row.infoHash);
+  return native.getPeerList(row.infoHash);
 }
 
 async function updateTrackers(id) {
   const row = db.getTorrent(id);
   if (!row) throw new Error('torrent not found');
   if (!row.infoHash) throw new Error('torrent has not started yet');
-  const sc = await ensureSidecar();
+  const native = await ensureEngine();
   await ensureInterfaces();
-  const result = await sc.updateTrackers(row.infoHash);
+  const result = await native.updateTrackers(row.infoHash);
   const fresh = db.getTorrent(id);
   emit('torrent:update', fresh);
   return result;
@@ -510,7 +498,7 @@ function emitQueue() {
 }
 
 async function pumpQueue() {
-  if (pumping || queueHeld || !sidecar || !sidecar.port) return;
+  if (pumping || queueHeld || !engine) return;
   pumping = true;
   try {
     const rows = db.listTorrents();
@@ -520,14 +508,14 @@ async function pumpQueue() {
     for (const row of queued) {
       if (active >= max) {
         if (row.infoHash) {
-          try { await sidecar.pauseTorrent(row.infoHash); } catch {}
+          try { await engine.pauseTorrent(row.infoHash); } catch {}
         }
         continue;
       }
       try {
         if (row.infoHash) {
           try {
-            await sidecar.resumeTorrent(row.infoHash);
+            await engine.resumeTorrent(row.infoHash);
           } catch (e) {
             if (/unknown infoHash/i.test(e && e.message ? e.message : '')) await startRow(row);
             else throw e;
@@ -573,26 +561,26 @@ function mapState(status, row) {
 async function poll() {
   if (polling) return;
   const tracked = db.listTorrents().filter((r) => POLLED_STATES.has(r.state) || r.state === 'queued');
-  // Recover from a crashed engine: start a fresh sidecar and let
-  // pumpQueue() re-add the rows (startRow uses the stored source).
-  if (!sidecar || !sidecar.port || sidecar.exited) {
+  // The addon loads lazily. When rows exist but no engine has been created
+  // yet (first tick after startup), create and bind it before polling.
+  if (!engine) {
     if (!tracked.length) return;
     try {
-      await ensureSidecar();
+      await ensureEngine();
       await ensureInterfaces();
     } catch (e) {
-      console.error('torrent engine restart:', e && e.message ? e.message : e);
+      console.error('torrent engine start:', e && e.message ? e.message : e);
       return;
     }
   }
   polling = true;
   try {
-    const sc = sidecar;
-    const rows = tracked.filter((r) => POLLED_STATES.has(r.state) && r.infoHash && sc && sc.port);
+    const native = engine;
+    const rows = tracked.filter((r) => POLLED_STATES.has(r.state) && r.infoHash && native);
     for (const row of rows) {
       let status;
       try {
-        status = await sc.getStatus(row.infoHash);
+        status = await native.getStatus(row.infoHash);
       } catch (e) {
         const message = e && e.message ? e.message : String(e);
         if (/unknown infoHash/i.test(message)) {
@@ -642,7 +630,7 @@ async function poll() {
         finishedAt: completed ? (row.finishedAt || Date.now()) : row.finishedAt,
       };
       // uploadLimitKbps/downloadLimitKbps on the row are user overrides where
-      // 0 means "inherit the global limit"; the sidecar reports the effective
+      // 0 means "inherit the global limit"; the engine reports the effective
       // values in the live progress event instead of overwriting them here.
 
       // Stop seeding when the user turned it off, this torrent opted out, or
@@ -651,7 +639,7 @@ async function poll() {
         const ratioLimit = Number(settings.torrentRatioLimit || row.ratioLimit || 0);
         const ratio = patch.downloaded > 0 ? patch.uploaded / patch.downloaded : 0;
         if (!seedingAllowed(row) || (ratioLimit > 0 && ratio >= ratioLimit)) {
-          try { await sc.pauseTorrent(row.infoHash); } catch {}
+          try { await native.pauseTorrent(row.infoHash); } catch {}
           patch.state = 'completed';
           patch.downKbps = 0;
           patch.upKbps = 0;
@@ -734,7 +722,7 @@ async function autostart() {
     }
   }
   try {
-    await ensureSidecar();
+    await ensureEngine();
   } catch (e) {
     console.error('torrent autostart:', e && e.message ? e.message : e);
     return;
@@ -755,19 +743,19 @@ function setSettings(next) {
   const uploadLimit = limitKbps(settings.torrentUploadLimitKbps);
   const downloadLimit = limitKbps(settings.torrentDownloadLimitKbps);
   const limitsChanged = uploadLimit !== previousUpload || downloadLimit !== previousDownload;
-  if (limitsChanged && sidecar && sidecar.port) {
-    sidecar.setSessionLimits(uploadLimit, downloadLimit).catch(() => {});
+  if (limitsChanged && engine) {
+    engine.setSessionLimits(uploadLimit, downloadLimit).catch(() => {});
   }
   // Per-torrent overrides win over the global limit, so reapply every row.
-  if (limitsChanged && sidecar && sidecar.port) {
+  if (limitsChanged && engine) {
     for (const row of db.listTorrents()) applyLimits(row);
   }
   const portChanged = String(settings.torrentPort || '') !== previousPort;
-  if (portChanged && sidecar) {
+  if (portChanged && engine) {
     const busy = db.listTorrents().some((r) => ACTIVE_STATES.has(r.state) || r.state === 'seeding');
     if (!busy) {
-      const old = sidecar;
-      sidecar = null;
+      const old = engine;
+      engine = null;
       interfacesReady = false;
       try { old.stop().catch(() => {}); } catch {}
     } else {
@@ -781,8 +769,8 @@ function shutdown() {
     clearInterval(pollTimer);
     pollTimer = null;
   }
-  const old = sidecar;
-  sidecar = null;
+  const old = engine;
+  engine = null;
   interfacesReady = false;
   if (old) {
     try { old.stop().catch(() => {}); } catch {}

@@ -1,15 +1,15 @@
-# Torrent engine (libtorrent sidecar)
+# Torrent engine (in-process libtorrent N-API addon)
 
-Ultra Downloader's torrent support is a small native process, `sidecar.exe`,
-built against [libtorrent](https://www.libtorrent.org/) 2.0.11 with OpenSSL so
-HTTPS trackers and encrypted peers work. The Electron app never links
-libtorrent; `src/torrent-engine/sidecar.js` starts the process, and
+Ultra Downloader's torrent support is a native Node-API addon,
+`torrent_addon.node`, built against [libtorrent](https://www.libtorrent.org/)
+2.0.11 with OpenSSL so HTTPS trackers and encrypted peers work. The Electron
+main process loads it directly; there is no child process, loopback listener,
+HTTP request or shared token. `src/torrent-engine/engine.js` wraps the addon and
 `src/torrents.js` owns the queue and the `torrents` table.
 
-The sidecar listens on `127.0.0.1` only. The app generates a random token per
-launch, passes it as `UD_TORRENT_TOKEN`, and sends it with every RPC; requests
-without it are rejected. A sidecar started without the variable exits
-immediately.
+Calls run on a libuv worker thread and enter libtorrent under one mutex, so the
+addon behaves like the old single-threaded sidecar while keeping the UI
+responsive during long operations such as binding interfaces.
 
 ## Build
 
@@ -22,6 +22,10 @@ Prerequisites on Windows x64:
   <https://github.com/arvidn/libtorrent/releases/download/v2.0.11/libtorrent-rasterbar-2.0.11.tar.gz>
 - **OpenSSL 3.0 source** —
   <https://github.com/openssl/openssl/releases/download/openssl-3.0.15/openssl-3.0.15.tar.gz>
+- **Node headers** containing `node_api.h`. The node-gyp cache for the bundled
+  Node (`%LOCALAPPDATA%\node-gyp\Cache\<version>\include\node`) is used
+  automatically; an Electron header cache is used as a fallback. Set
+  `UD_NODE_INCLUDE` to override the search.
 - A **Unix-like Perl** for OpenSSL's Configure. Git for Windows' Perl works
   when the few missing core modules (`ExtUtils::MakeMaker`,
   `Locale::Maketext::Simple`, `Pod::Usage`) are on `PERL5LIB`; MSYS2's `perl`
@@ -64,7 +68,7 @@ cmake --build build-lt -j 8
 `-Dencryption=ON` must report OpenSSL as found. A build with
 `-Dencryption=OFF` cannot announce to HTTPS trackers and must not be shipped.
 
-### 3. sidecar.exe
+### 3. torrent_addon.node
 
 ```powershell
 # From the repository root. Defaults match the layout above:
@@ -82,21 +86,29 @@ The script also accepts explicit paths or environment variables:
   -LibtorrentRoot C:\src\libtorrent-rasterbar-2.0.11 `
   -LibtorrentBuild C:\src\build-lt `
   -BoostRoot C:\src\boost_1_86_0 `
-  -OpenSslRoot C:\src\openssl-mingw64
+  -OpenSslRoot C:\src\openssl-mingw64 `
+  -NodeInclude C:\src\node-headers\include\node
 ```
 
-It writes `resources\torrent\sidecar.exe`. The file is git-ignored and is
-copied into the installed app by electron-builder's `extraResources` as
-`<resources>\torrent\sidecar.exe`. Build it before `npm run dist`.
+It writes `resources\torrent\torrent_addon.node` and removes a stale
+`sidecar.exe` if one is still there. The file is git-ignored and is copied into
+the installed app by electron-builder's `extraResources` as
+`<resources>\torrent\torrent_addon.node`. Build it before `npm run dist`.
 
-The link line includes `-lssl -lcrypto`, `-static`, and the same
+The link line is a shared library (`-shared -fPIC`) with `-lssl -lcrypto`,
+static libtorrent, `-static-libgcc -static-libstdc++` and the same
 `TORRENT_USE_OPENSSL` / `TORRENT_SSL_PEERS` defines libtorrent exports to its
-consumers, so the sidecar and the static library share one ABI.
+consumers, so the addon and the static library share one ABI. No `node.lib`,
+`.def` file or delay-load hook is used: `addon.cpp` resolves the `napi_*`
+entry points from the host process with `GetProcAddress` when Electron loads
+it.
 
-## RPC
+## Addon API
 
-`POST /rpc` with `{"token":"…","method":"…","params":{…}}`. The process prints
-`SIDECAR_PORT=<port>` and `LIBTORRENT_VERSION=<version>` on stdout when ready.
+`addon.call(method, params)` returns a Promise. It resolves with
+`{ok: true, result}` and rejects with `Error("<method> failed: <error>")` when
+the method returns a result error. The work runs off the JS thread and is
+serialized by a mutex. `addon.version` reports the linked libtorrent version.
 
 | Method | Params | Result |
 | --- | --- | --- |
@@ -111,19 +123,16 @@ consumers, so the sidecar and the static library share one ABI.
 | `setSessionLimits` | `uploadKbps`, `downloadKbps` | `{applied, uploadKbps, downloadKbps}` |
 | `peerList` | `infoHash` | `{infoHash, peers[]}` with IP, client, rates, progress, flags, source, RTT |
 | `updateTrackers` | `infoHash` | `{reannounced, scraped, infoHash}`; forces an announce and scrape, honouring tracker `min_interval` |
-| `stop` | — | `{stopped}` and the process exits |
+| `stop` | — | `{stopped}` and the libtorrent session is destroyed |
 
 Limits are in kilobits per second. Per-torrent `setLimits` values at or below 0
 mean unlimited (`-1` bytes/s in libtorrent); `setSessionLimits` values at or
 below 0 mean unlimited (`0` in the settings pack). libtorrent does not rate
 limit peers on the local network by default, so LAN peers may exceed a cap.
 
-`GET /health?token=…` returns the libtorrent version; without the token it
-returns 401.
-
 Multiple torrents are tracked in one session, keyed by info hash. Interface
 binding is IP-based (`addr:port` listeners plus outgoing source addresses) with
-a throwaway GUID probe; if Windows refuses GUID binding, the sidecar falls back
+a throwaway GUID probe; if Windows refuses GUID binding, the addon falls back
 to IP and records the reason in `guidAttempt`. Bind interfaces before adding
 the first torrent — re-applying listen settings to a live session was
 unreliable with libtorrent 2.0.11 on Windows.

@@ -3,7 +3,7 @@ dist/
 dist-local/
 dist-final/
 node_modules/
-resources/torrent/sidecar.exe
+resources/torrent/torrent_addon.node
 *.db
 *.db-wal
 *.db-shm

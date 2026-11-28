@@ -1,11 +1,12 @@
-// tools/torrent-engine/native/sidecar.cpp
+// tools/torrent-engine/native/addon.cpp
 //
-// Local JSON-over-HTTP daemon around libtorrent 2.0.x. It is a standalone
-// helper process: the Electron app talks to it over loopback only and never
-// links libtorrent itself. The listener is bound to 127.0.0.1 and every
-// request must carry the shared token from UD_TORRENT_TOKEN.
+// In-process N-API addon around libtorrent 2.0.x. The Electron main process
+// loads torrent_addon.node directly; there is no child process, socket, token
+// or HTTP layer. src/torrent-engine/engine.js calls:
 //
-// API (POST /rpc, body {"token": "...", "method": ..., "params": {...}}):
+//   addon.call(method, params) -> Promise<{ok, result, error}>
+//
+// API (method, params):
 //   startTorrent {torrent: "<magnet or .torrent path>", saveDir: "<dir>"}
 //       -> {infoHash, name, isMagnet}
 //   status {infoHash} -> {progress, downKbps, upKbps,
@@ -29,7 +30,7 @@
 //       each tracker's min_interval, so repeated clicks may be rate-limited.
 //   pauseTorrent {infoHash} / resumeTorrent {infoHash}
 //   removeTorrent {infoHash, deleteFiles?: true}
-//   stop -> {ok: true}
+//   stop -> {stopped: true} (drops the session; the next call starts clean)
 //   ping -> {pong: true, version: "..."}
 //
 // Build: see native/build.ps1 and README.md.
@@ -58,6 +59,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -321,7 +323,8 @@ static void json_write(std::string& out, const Json& j) {
 }
 
 // ---------------------------------------------------------------------------
-// Sidecar state
+// Addon state. Every call runs on a libuv worker thread and is serialized by
+// g_engine_mutex, matching the old single-threaded sidecar request loop.
 // ---------------------------------------------------------------------------
 
 struct TorrentEntry {
@@ -335,11 +338,10 @@ struct TorrentEntry {
 
 static std::unique_ptr<lt::session> g_session;
 static std::map<std::string, TorrentEntry> g_torrents;
-static std::string g_token;
 static std::deque<std::string> g_alerts;
-static volatile bool g_running = true;
 static int g_sessionUploadBytes = 0;
 static int g_sessionDownloadBytes = 0;
+static std::mutex g_engine_mutex;
 
 static int kbps_to_torrent_bytes(double kbps) {
   return kbps <= 0 ? -1 : static_cast<int>(kbps * 1000.0 / 8.0);
@@ -1181,20 +1183,10 @@ static Json rpc_set_interfaces(const Json& params) {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP plumbing
+// Method dispatch
 // ---------------------------------------------------------------------------
 
-static std::string http_response(int code, const std::string& body) {
-  std::ostringstream oss;
-  oss << "HTTP/1.1 " << code << (code == 200 ? " OK" : " Error") << "\r\n"
-      << "Content-Type: application/json\r\n"
-      << "Content-Length: " << body.size() << "\r\n"
-      << "Connection: close\r\n\r\n"
-      << body;
-  return oss.str();
-}
-
-static std::string dispatch_rpc(const Json& request) {
+static Json dispatch_rpc(const Json& request) {
   Json response = Json::obj();
   std::string method = request["method"].as_string();
   Json params = request.has("params") ? request["params"] : Json::obj();
@@ -1225,8 +1217,12 @@ static std::string dispatch_rpc(const Json& request) {
     result = rpc_remove_torrent(params);
   } else if (method == "stop") {
     result = Json::obj();
+    // The old sidecar process exited here. Mirror that: drop the session and
+    // all handles so the next ensureEngine() starts from an empty engine.
+    g_torrents.clear();
+    g_alerts.clear();
+    if (g_session) g_session.reset();
     result.object["stopped"] = Json::boolean_value(true);
-    g_running = false;
   } else if (method == "ping") {
     result = Json::obj();
     result.object["pong"] = Json::boolean_value(true);
@@ -1246,179 +1242,337 @@ static std::string dispatch_rpc(const Json& request) {
     }
     response.object["result"] = result;
   }
-  std::string encoded;
-  json_write(encoded, response);
-  return encoded;
+  return response;
 }
 
-static bool read_http_request(SOCKET client, std::string& method, std::string& path, std::string& body) {
-  std::string data;
-  char buf[8192];
-  size_t header_end = std::string::npos;
-  while (header_end == std::string::npos) {
-    int n = recv(client, buf, sizeof(buf), 0);
-    if (n <= 0) return false;
-    data.append(buf, static_cast<size_t>(n));
-    header_end = data.find("\r\n\r\n");
-    if (data.size() > 1024 * 1024) return false;
-  }
+// ---------------------------------------------------------------------------
+// N-API bridge
+//
+// The addon is loaded by the Electron main process, which exports the N-API
+// entry points from its executable. MinGW builds have no import library for
+// those exports, so every function pointer is resolved from the host module at
+// registration time. node_api.h supplies type declarations only; the addon is
+// not linked against node.lib or any other import library.
+// ---------------------------------------------------------------------------
 
-  size_t line_end = data.find("\r\n");
-  std::string request_line = data.substr(0, line_end);
-  std::istringstream iss(request_line);
-  std::string version;
-  iss >> method >> path >> version;
+#include <node_api.h>
 
-  size_t content_length = 0;
-  size_t scan = line_end + 2;
-  while (scan + 1 < header_end) {
-    size_t eol = data.find("\r\n", scan);
-    if (eol == std::string::npos || eol > header_end) break;
-    std::string line = data.substr(scan, eol - scan);
-    std::string lower = line;
-    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
-    if (lower.rfind("content-length:", 0) == 0) {
-      try { content_length = static_cast<size_t>(std::stoul(line.substr(15))); } catch (...) {}
+struct NapiApi {
+  decltype(&napi_get_cb_info) get_cb_info = nullptr;
+  decltype(&napi_create_function) create_function = nullptr;
+  decltype(&napi_set_named_property) set_named_property = nullptr;
+  decltype(&napi_create_string_utf8) create_string_utf8 = nullptr;
+  decltype(&napi_create_object) create_object = nullptr;
+  decltype(&napi_create_array_with_length) create_array_with_length = nullptr;
+  decltype(&napi_get_boolean) get_boolean = nullptr;
+  decltype(&napi_get_null) get_null = nullptr;
+  decltype(&napi_get_undefined) get_undefined = nullptr;
+  decltype(&napi_create_double) create_double = nullptr;
+  decltype(&napi_set_element) set_element = nullptr;
+  decltype(&napi_typeof) type_of = nullptr;
+  decltype(&napi_get_value_bool) get_value_bool = nullptr;
+  decltype(&napi_get_value_double) get_value_double = nullptr;
+  decltype(&napi_get_value_string_utf8) get_value_string_utf8 = nullptr;
+  decltype(&napi_is_array) is_array = nullptr;
+  decltype(&napi_get_array_length) get_array_length = nullptr;
+  decltype(&napi_get_element) get_element = nullptr;
+  decltype(&napi_get_property_names) get_property_names = nullptr;
+  decltype(&napi_get_named_property) get_named_property = nullptr;
+  decltype(&napi_create_async_work) create_async_work = nullptr;
+  decltype(&napi_delete_async_work) delete_async_work = nullptr;
+  decltype(&napi_queue_async_work) queue_async_work = nullptr;
+  decltype(&napi_create_promise) create_promise = nullptr;
+  decltype(&napi_resolve_deferred) resolve_deferred = nullptr;
+  decltype(&napi_reject_deferred) reject_deferred = nullptr;
+  decltype(&napi_create_error) create_error = nullptr;
+  decltype(&napi_throw_error) throw_error = nullptr;
+};
+
+static NapiApi g_napi;
+
+template <typename T>
+static bool load_napi_symbol(HMODULE host, T& target, const char* name) {
+  target = reinterpret_cast<T>(GetProcAddress(host, name));
+  return target != nullptr;
+}
+
+static bool load_napi_api() {
+  HMODULE host = GetModuleHandleW(nullptr);
+  if (!host) return false;
+  bool ok = true;
+  ok = load_napi_symbol(host, g_napi.get_cb_info, "napi_get_cb_info") && ok;
+  ok = load_napi_symbol(host, g_napi.create_function, "napi_create_function") && ok;
+  ok = load_napi_symbol(host, g_napi.set_named_property, "napi_set_named_property") && ok;
+  ok = load_napi_symbol(host, g_napi.create_string_utf8, "napi_create_string_utf8") && ok;
+  ok = load_napi_symbol(host, g_napi.create_object, "napi_create_object") && ok;
+  ok = load_napi_symbol(host, g_napi.create_array_with_length, "napi_create_array_with_length") && ok;
+  ok = load_napi_symbol(host, g_napi.get_boolean, "napi_get_boolean") && ok;
+  ok = load_napi_symbol(host, g_napi.get_null, "napi_get_null") && ok;
+  ok = load_napi_symbol(host, g_napi.get_undefined, "napi_get_undefined") && ok;
+  ok = load_napi_symbol(host, g_napi.create_double, "napi_create_double") && ok;
+  ok = load_napi_symbol(host, g_napi.set_element, "napi_set_element") && ok;
+  ok = load_napi_symbol(host, g_napi.type_of, "napi_typeof") && ok;
+  ok = load_napi_symbol(host, g_napi.get_value_bool, "napi_get_value_bool") && ok;
+  ok = load_napi_symbol(host, g_napi.get_value_double, "napi_get_value_double") && ok;
+  ok = load_napi_symbol(host, g_napi.get_value_string_utf8, "napi_get_value_string_utf8") && ok;
+  ok = load_napi_symbol(host, g_napi.is_array, "napi_is_array") && ok;
+  ok = load_napi_symbol(host, g_napi.get_array_length, "napi_get_array_length") && ok;
+  ok = load_napi_symbol(host, g_napi.get_element, "napi_get_element") && ok;
+  ok = load_napi_symbol(host, g_napi.get_property_names, "napi_get_property_names") && ok;
+  ok = load_napi_symbol(host, g_napi.get_named_property, "napi_get_named_property") && ok;
+  ok = load_napi_symbol(host, g_napi.create_async_work, "napi_create_async_work") && ok;
+  ok = load_napi_symbol(host, g_napi.delete_async_work, "napi_delete_async_work") && ok;
+  ok = load_napi_symbol(host, g_napi.queue_async_work, "napi_queue_async_work") && ok;
+  ok = load_napi_symbol(host, g_napi.create_promise, "napi_create_promise") && ok;
+  ok = load_napi_symbol(host, g_napi.resolve_deferred, "napi_resolve_deferred") && ok;
+  ok = load_napi_symbol(host, g_napi.reject_deferred, "napi_reject_deferred") && ok;
+  ok = load_napi_symbol(host, g_napi.create_error, "napi_create_error") && ok;
+  ok = load_napi_symbol(host, g_napi.throw_error, "napi_throw_error") && ok;
+  return ok;
+}
+
+// Recursive JS -> Json conversion for call(method, params).
+static Json json_from_napi(napi_env env, napi_value value) {
+  napi_valuetype type = napi_undefined;
+  if (!value || g_napi.type_of(env, value, &type) != napi_ok) return Json();
+  switch (type) {
+    case napi_boolean: {
+      bool b = false;
+      if (g_napi.get_value_bool(env, value, &b) != napi_ok) return Json();
+      return Json::boolean_value(b);
     }
-    scan = eol + 2;
+    case napi_number: {
+      double d = 0.0;
+      if (g_napi.get_value_double(env, value, &d) != napi_ok) return Json();
+      return Json::num(d);
+    }
+    case napi_string: {
+      size_t length = 0;
+      if (g_napi.get_value_string_utf8(env, value, nullptr, 0, &length) != napi_ok) return Json();
+      std::string text(length + 1, '\0');
+      if (length) {
+        if (g_napi.get_value_string_utf8(env, value, &text[0], length + 1, &length) != napi_ok) {
+          return Json();
+        }
+        text.resize(length);
+      } else {
+        text.clear();
+      }
+      return Json::str(text);
+    }
+    case napi_object: {
+      bool is_array = false;
+      if (g_napi.is_array(env, value, &is_array) != napi_ok) return Json();
+      if (is_array) {
+        uint32_t length = 0;
+        if (g_napi.get_array_length(env, value, &length) != napi_ok) return Json();
+        Json out = Json::arr();
+        out.array.reserve(length);
+        for (uint32_t i = 0; i < length; ++i) {
+          napi_value item = nullptr;
+          if (g_napi.get_element(env, value, i, &item) != napi_ok) {
+            out.array.push_back(Json());
+            continue;
+          }
+          out.array.push_back(json_from_napi(env, item));
+        }
+        return out;
+      }
+      napi_value names = nullptr;
+      Json out = Json::obj();
+      if (g_napi.get_property_names(env, value, &names) != napi_ok) return out;
+      uint32_t count = 0;
+      if (g_napi.get_array_length(env, names, &count) != napi_ok) return out;
+      for (uint32_t i = 0; i < count; ++i) {
+        napi_value key_value = nullptr;
+        if (g_napi.get_element(env, names, i, &key_value) != napi_ok) continue;
+        Json key = json_from_napi(env, key_value);
+        if (key.type != Json::STR) continue;
+        napi_value item = nullptr;
+        if (g_napi.get_named_property(env, value, key.string.c_str(), &item) != napi_ok) continue;
+        out.object[key.string] = json_from_napi(env, item);
+      }
+      return out;
+    }
+    default:
+      return Json();
   }
-  if (content_length > 2 * 1024 * 1024) return false;
-
-  body = data.substr(header_end + 4);
-  while (body.size() < content_length) {
-    int n = recv(client, buf, sizeof(buf), 0);
-    if (n <= 0) return false;
-    body.append(buf, static_cast<size_t>(n));
-  }
-  return true;
 }
 
-static void handle_client(SOCKET client) {
-  std::string method, path, body;
-  if (!read_http_request(client, method, path, body)) {
-    std::string resp = http_response(400, "{\"ok\":false,\"error\":\"bad request\"}");
-    send(client, resp.c_str(), static_cast<int>(resp.size()), 0);
-    closesocket(client);
+// Recursive Json -> JS conversion for replies.
+static napi_value napi_from_json(napi_env env, const Json& value) {
+  napi_value out = nullptr;
+  switch (value.type) {
+    case Json::NUL:
+      if (g_napi.get_null(env, &out) != napi_ok) return nullptr;
+      return out;
+    case Json::BOOL:
+      if (g_napi.get_boolean(env, value.boolean, &out) != napi_ok) return nullptr;
+      return out;
+    case Json::NUM:
+      if (g_napi.create_double(env, value.number, &out) != napi_ok) return nullptr;
+      return out;
+    case Json::STR:
+      if (g_napi.create_string_utf8(env, value.string.c_str(), value.string.size(), &out) != napi_ok) {
+        return nullptr;
+      }
+      return out;
+    case Json::ARR: {
+      if (g_napi.create_array_with_length(env, value.array.size(), &out) != napi_ok) return nullptr;
+      for (size_t i = 0; i < value.array.size(); ++i) {
+        napi_value item = napi_from_json(env, value.array[i]);
+        if (!item) return nullptr;
+        if (g_napi.set_element(env, out, static_cast<uint32_t>(i), item) != napi_ok) return nullptr;
+      }
+      return out;
+    }
+    case Json::OBJ: {
+      if (g_napi.create_object(env, &out) != napi_ok) return nullptr;
+      for (const auto& kv : value.object) {
+        napi_value item = napi_from_json(env, kv.second);
+        if (!item) return nullptr;
+        if (g_napi.set_named_property(env, out, kv.first.c_str(), item) != napi_ok) return nullptr;
+      }
+      return out;
+    }
+  }
+  return nullptr;
+}
+
+struct CallWork {
+  napi_async_work work = nullptr;
+  napi_deferred deferred = nullptr;
+  std::string method;
+  Json params;
+  Json result;
+  std::string error;
+};
+
+static void execute_call(napi_env /*env*/, void* data) {
+  CallWork* work = static_cast<CallWork*>(data);
+  try {
+    Json request = Json::obj();
+    request.object["method"] = Json::str(work->method);
+    request.object["params"] = work->params;
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    work->result = dispatch_rpc(request);
+  } catch (const std::exception& e) {
+    work->error = e.what();
+  } catch (...) {
+    work->error = "unknown native error";
+  }
+}
+
+static void complete_call(napi_env env, napi_status status, void* data) {
+  CallWork* work = static_cast<CallWork*>(data);
+  if (work->work) g_napi.delete_async_work(env, work->work);
+
+  auto reject = [&](const std::string& message) {
+    napi_value message_value = nullptr;
+    g_napi.create_string_utf8(env, message.c_str(), message.size(), &message_value);
+    napi_value error_value = nullptr;
+    g_napi.create_error(env, nullptr, message_value, &error_value);
+    g_napi.reject_deferred(env, work->deferred, error_value);
+  };
+
+  if (status != napi_ok) {
+    reject(work->method + " failed: async work cancelled");
+    delete work;
+    return;
+  }
+  if (!work->error.empty()) {
+    reject(work->method + " failed: " + work->error);
+    delete work;
     return;
   }
 
-  std::string payload;
-  int status = 200;
-
-  auto token_from_query = [](const std::string& target) {
-    size_t q = target.find("token=");
-    if (q == std::string::npos) return std::string();
-    size_t start = q + 6;
-    size_t end = target.find('&', start);
-    return target.substr(start, end == std::string::npos ? std::string::npos : end - start);
-  };
-
-  if (method == "GET" && path.rfind("/health", 0) == 0) {
-    if (token_from_query(path) != g_token) {
-      status = 401;
-      payload = "{\"ok\":false,\"error\":\"unauthorized\"}";
-    } else {
-      payload = std::string("{\"ok\":true,\"result\":{\"status\":\"ok\",\"version\":\"") + lt::version() + "\"}}";
-    }
-  } else if (method == "POST" && (path == "/rpc" || path == "/")) {
-    Json request;
-    std::string parse_error;
-    JsonParser parser(body);
-    if (!parser.parse(request, parse_error)) {
-      status = 400;
-      payload = "{\"ok\":false,\"error\":\"invalid json: " + parse_error + "\"}";
-    } else if (request["token"].as_string() != g_token) {
-      status = 401;
-      payload = "{\"ok\":false,\"error\":\"unauthorized\"}";
-    } else {
-      payload = dispatch_rpc(request);
-    }
-  } else {
-    status = 404;
-    payload = "{\"ok\":false,\"error\":\"not found\"}";
+  const bool ok = work->result["ok"].type == Json::BOOL && work->result["ok"].boolean;
+  if (!ok) {
+    const std::string error = work->result["error"].as_string();
+    reject(work->method + " failed: " + (error.empty() ? "unknown native error" : error));
+    delete work;
+    return;
   }
 
-  std::string resp = http_response(status, payload);
-  send(client, resp.c_str(), static_cast<int>(resp.size()), 0);
-  closesocket(client);
+  napi_value result = napi_from_json(env, work->result);
+  if (!result) {
+    reject(work->method + " failed: could not convert the reply to JavaScript");
+    delete work;
+    return;
+  }
+  g_napi.resolve_deferred(env, work->deferred, result);
+  delete work;
 }
 
-int main(int argc, char** argv) {
-  int requested_port = 0;
-  for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc) requested_port = std::atoi(argv[++i]);
+// call(method: string, params: object): Promise<{ok, result, error}>
+static napi_value call_binding(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2] = {nullptr, nullptr};
+  if (g_napi.get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok) {
+    g_napi.throw_error(env, nullptr, "torrent addon: could not read call arguments");
+    return nullptr;
   }
 
-  // The app generates a random token per launch and passes it in the child
-  // environment. Refusing to run without one keeps a stray local process from
-  // exposing an open control API.
-  const char* token_env = std::getenv("UD_TORRENT_TOKEN");
-  if (!token_env || !*token_env) {
-    std::fprintf(stderr, "UD_TORRENT_TOKEN is required\n");
-    return 1;
-  }
-  g_token = token_env;
-
-  WSADATA wsa;
-  if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-    std::fprintf(stderr, "WSAStartup failed\n");
-    return 1;
+  napi_value promise = nullptr;
+  napi_deferred deferred = nullptr;
+  if (g_napi.create_promise(env, &deferred, &promise) != napi_ok) {
+    g_napi.throw_error(env, nullptr, "torrent addon: could not create a promise");
+    return nullptr;
   }
 
-  // The libtorrent session is created lazily by setInterfaces() or
-  // startTorrent(). Creating it up front would force apply_settings() later,
-  // which can break DHT on Windows.
+  CallWork* work = new CallWork();
+  work->deferred = deferred;
 
-  SOCKET server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (server == INVALID_SOCKET) {
-    std::fprintf(stderr, "socket() failed: %d\n", WSAGetLastError());
-    return 1;
-  }
-  BOOL reuse = TRUE;
-  setsockopt(server, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
-
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-  addr.sin_port = htons(static_cast<u_short>(requested_port));
-  if (bind(server, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-    std::fprintf(stderr, "bind() failed: %d\n", WSAGetLastError());
-    return 1;
-  }
-  if (listen(server, 8) == SOCKET_ERROR) {
-    std::fprintf(stderr, "listen() failed: %d\n", WSAGetLastError());
-    return 1;
-  }
-  sockaddr_in bound{};
-  int bound_len = sizeof(bound);
-  getsockname(server, reinterpret_cast<sockaddr*>(&bound), &bound_len);
-  std::printf("SIDECAR_PORT=%u\n", ntohs(bound.sin_port));
-  std::printf("LIBTORRENT_VERSION=%s\n", lt::version());
-  std::fflush(stdout);
-
-  while (g_running) {
-    fd_set readfds;
-    FD_ZERO(&readfds);
-    FD_SET(server, &readfds);
-    timeval tv{0, 200000};
-    int ready = select(static_cast<int>(server) + 1, &readfds, nullptr, nullptr, &tv);
-    if (ready > 0 && FD_ISSET(server, &readfds)) {
-      SOCKET client = accept(server, nullptr, nullptr);
-      if (client != INVALID_SOCKET) handle_client(client);
-    }
-    std::vector<lt::alert*> alerts;
-    if (g_session) {
-      g_session->pop_alerts(&alerts);
-      for (const auto* a : alerts) record_alert(a);
+  if (argc >= 1) {
+    size_t length = 0;
+    if (g_napi.get_value_string_utf8(env, argv[0], nullptr, 0, &length) == napi_ok) {
+      work->method.resize(length + 1, '\0');
+      size_t copied = 0;
+      if (g_napi.get_value_string_utf8(env, argv[0], &work->method[0], length + 1, &copied) == napi_ok) {
+        work->method.resize(copied);
+      } else {
+        work->method.clear();
+      }
     }
   }
+  if (argc >= 2) work->params = json_from_napi(env, argv[1]);
+  if (work->params.type != Json::OBJ) work->params = Json::obj();
 
-  closesocket(server);
-  if (g_session) {
-    g_session->abort();
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    g_session.reset();
+  napi_value resource_name = nullptr;
+  g_napi.create_string_utf8(env, "torrent-call", NAPI_AUTO_LENGTH, &resource_name);
+  if (g_napi.create_async_work(env, nullptr, resource_name, execute_call, complete_call, work, &work->work) !=
+      napi_ok) {
+    delete work;
+    napi_value message_value = nullptr;
+    g_napi.create_string_utf8(env, "torrent addon: could not queue async work", NAPI_AUTO_LENGTH,
+                              &message_value);
+    napi_value error_value = nullptr;
+    g_napi.create_error(env, nullptr, message_value, &error_value);
+    g_napi.reject_deferred(env, deferred, error_value);
+    return promise;
   }
-  WSACleanup();
-  return 0;
+  g_napi.queue_async_work(env, work->work);
+  return promise;
+}
+
+extern "C" __declspec(dllexport) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+  if (!load_napi_api()) {
+    if (g_napi.throw_error) {
+      g_napi.throw_error(env, nullptr,
+                         "torrent addon: could not resolve the napi_* exports from the host process");
+    }
+    return nullptr;
+  }
+
+  napi_value call_fn = nullptr;
+  if (g_napi.create_function(env, "call", NAPI_AUTO_LENGTH, call_binding, nullptr, &call_fn) != napi_ok) {
+    g_napi.throw_error(env, nullptr, "torrent addon: could not export call()");
+    return nullptr;
+  }
+  g_napi.set_named_property(env, exports, "call", call_fn);
+
+  napi_value version_value = nullptr;
+  g_napi.create_string_utf8(env, lt::version(), NAPI_AUTO_LENGTH, &version_value);
+  g_napi.set_named_property(env, exports, "version", version_value);
+  return exports;
 }

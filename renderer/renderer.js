@@ -797,6 +797,16 @@ $('#addTorrent').addEventListener('click', async () => {
     btn.disabled = false;
   }
 });
+$('#torrentBrowseBtn').addEventListener('click', async () => {
+  try {
+    const file = await window.api.torrents.chooseFile();
+    if (!file) return;
+    $('#quickMagnet').value = file;
+    $('#quickMagnet').focus();
+  } catch (e) {
+    toast(String((e && e.message) || e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, ''), 'error');
+  }
+});
 $('#quickMagnet').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#addTorrent').click(); });
 
 $('#pauseAllTorrents').addEventListener('click', async () => {

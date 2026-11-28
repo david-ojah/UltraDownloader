@@ -206,13 +206,14 @@ Windows** choice is part of the separate in-app onboarding overlay.
 ## Torrents
 
 Ultra Downloader downloads and seeds BitTorrent content with an embedded
-libtorrent engine (`resources\torrent\sidecar.exe`). The engine is a separate
-local process; the app talks to it over a token-protected loopback port, so it
-is not reachable from the network.
+libtorrent engine (`resources\torrent\torrent_addon.node`). The addon runs
+inside the Electron main process; it opens no control port and starts no
+separate process.
 
 - Add a magnet link or a `.torrent` URL on the **Torrents** tab, or open a
   `.torrent` file or `magnet:` link from Windows — the installer registers both
-  associations.
+  associations. A local `.torrent` file can also be picked with **Browse** on
+  the **Torrents** tab.
 - Each card shows progress, ETA, peers, seeds, rates, ratio, total wanted/done,
   all-time transfer, pieces, tracker, swarm counts, connections, distributed
   copies, active/seeding time and the effective speed limits. **Files** lets you
@@ -494,10 +495,10 @@ npm start
 npm run dist
 ```
 
-The torrent engine is a native sidecar built against a static libtorrent with
-encryption (OpenSSL) enabled. `npm run build:torrent` writes
-`resources\torrent\sidecar.exe`; it is not committed. Prerequisites and the
-full libtorrent/OpenSSL build recipe are in
+The torrent engine is an in-process N-API addon loaded by the Electron main
+process, built against a static libtorrent with encryption (OpenSSL) enabled.
+`npm run build:torrent` writes `resources\torrent\torrent_addon.node`; it is not
+committed. Prerequisites and the full libtorrent/OpenSSL build recipe are in
 [tools/torrent-engine/README.md](tools/torrent-engine/README.md). Run it before
 `npm run dist`, because `extraResources` copies `resources\torrent` into the
 installer.
@@ -557,9 +558,9 @@ src/downloader.js       Queue, range engine, resume, assembly, retries, limits
 src/connections.js      Network adapter detection and per-adapter settings
 src/linkgrabber.js      Scans a web page for downloadable links
 src/torrents.js         Torrent queue, state mapping and persistence
-src/torrent-engine/     Sidecar client and adapter GUID helper
-tools/torrent-engine/   Native sidecar source, build script and README
-resources/torrent/      Built sidecar.exe (local only, git-ignored)
+src/torrent-engine/     Addon client and adapter GUID helper
+tools/torrent-engine/   Native addon source, build script and README
+resources/torrent/      Built torrent_addon.node (local only, git-ignored)
 renderer/index.html     App shell and tabs
 renderer/renderer.js    Cards, queue state, settings UI
 renderer/styles.css     Theme and layout

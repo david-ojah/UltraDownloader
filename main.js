@@ -621,6 +621,16 @@ ipcMain.handle('torrents:chooseFolder', async () => {
   });
   return r.canceled ? null : r.filePaths[0];
 });
+ipcMain.handle('torrents:chooseFile', async () => {
+  const r = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'Torrent files', extensions: ['torrent'] },
+      { name: 'All files', extensions: ['*'] }
+    ]
+  });
+  return r.canceled ? null : r.filePaths[0];
+});
 ipcMain.handle('torrents:remove', async (e, id) => {
   const row = db.getTorrent(id);
   if (!row) return { removed: false };

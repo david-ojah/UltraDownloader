@@ -37,7 +37,8 @@ contextBridge.exposeInMainWorld('api', {
     setLimits: (id, uploadKbps, downloadKbps) => ipcRenderer.invoke('torrents:setLimits', id, uploadKbps, downloadKbps),
     getPeerList: (id) => ipcRenderer.invoke('torrents:peerList', id),
     updateTrackers: (id) => ipcRenderer.invoke('torrents:updateTrackers', id),
-    chooseFolder: () => ipcRenderer.invoke('torrents:chooseFolder')
+    chooseFolder: () => ipcRenderer.invoke('torrents:chooseFolder'),
+    chooseFile: () => ipcRenderer.invoke('torrents:chooseFile')
   },
   app: {
     info: () => ipcRenderer.invoke('app:info'),
