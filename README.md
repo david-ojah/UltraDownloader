@@ -8,7 +8,20 @@ and builds the finished file only once every piece has arrived. It is designed
 to survive huge downloads, flaky links and expired file-host URLs without
 starting over.
 
-**Current version: 1.3.0**
+**Current version: 1.3.1**
+
+---
+
+## What's new in 1.3.1
+
+- **Torrents now run in-process.** The embedded libtorrent engine is a native
+  addon inside the app: no sidecar process, control port or token. All the
+  torrent features from 1.3.0 are preserved, including per-adapter binding.
+- **Browse for a local `.torrent` file.** A new **Browse** button on the
+  **Torrents** tab lets you pick a `.torrent` file on your PC.
+- Everything from 1.3.0 is still here: magnet and `.torrent` URL downloads,
+  file selection, seeding, per-torrent limits, tracker updates, onboarding and
+  the rest.
 
 ---
 
@@ -17,7 +30,7 @@ starting over.
 - **Torrent downloading is built in.** Add a magnet link or a `.torrent` URL on
   the **Torrents** tab, or open a magnet link or `.torrent` file from Windows.
   The embedded libtorrent engine handles peer discovery, DHT, trackers and
-  piece verification on a token-protected loopback port.
+  piece verification.
 - **Choose files before downloading.** **Files** on a torrent card lets you
   uncheck files whose pieces should not be fetched.
 - **Seeding, pause, resume, remove and restart resume.** Seeding is on by
